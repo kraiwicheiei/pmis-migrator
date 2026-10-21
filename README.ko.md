@@ -5,16 +5,17 @@
 `Code_Migration.js` 의 `runDwrAiMigrationTurbo` / `runDrqAiMigrationTurbo` 를 대체합니다. 프롬프트, 모델(`gemini-3.8-flash`),
 DB_DWR / DB_DRQ 열 순서는 기존과 완전히 동일하지만 내 PC 에서 실행되므로 Apps Script 의 UrlFetch 쿼터에 걸리지 않습니다.
 현재 Apps Script(`Code_Migration.js`, 대용량 PDF 는 `Code_Core.js` 의 `extractDriveFileForAI`)를 따릅니다.
+큐를 만드는 `extractLegacyDwrLinks` / `extractLegacyDrqLinks` 도 대체합니다(`--extract` 참고).
 
 ## 개요: 누가 무엇을 하는가
 
 | 단계 | 실행 위치 |
 |---|---|
-| 기존 시트 `<legacy DWR sheet>` / `<legacy DRQ sheet>` 에서 `MIGRATION_QUEUE` / `MIGRATION_QUEUE_DRQ` 큐 생성 | **Apps Script** (`extractLegacyDwrLinks()` / `extractLegacyDrqLinks()`). Python 스크립트는 **큐를 만들지 않습니다** |
+| 기존 시트 `<legacy DWR sheet>` / `<legacy DRQ sheet>` 에서 `MIGRATION_QUEUE` / `MIGRATION_QUEUE_DRQ` 큐 생성 | **이 Python 스크립트** 의 `--extract` (Apps Script 의 `extractLegacyDwrLinks()` / `extractLegacyDrqLinks()` 를 대체) |
 | PDF 다운로드 -> Gemini -> DB_DWR / DB_DRQ 기록 -> `Done` 표시 | **이 Python 스크립트** |
 
-> **`extractLegacyDwrLinks()` / `extractLegacyDrqLinks()` 재실행:** 현재 `Code_Migration.js` 에서 두 함수는 큐를 `clear()` 한 뒤 **모든** 항목(이미 DB_DWR / DB_DRQ 에 있는 PDF 포함)을 `Waiting` 으로 다시 만들고, 기존 `Done` / `Error…` 상태는 모두 지워집니다.
-> Python 스크립트가 이를 보완합니다: PDF 가 이미 DB 에 있는 `Waiting` 행(PDF Link 열의 Drive 파일 ID 로 비교)은 AI 호출 없이 `Done` 으로 표시됩니다. 두 함수를 다시 실행하기 전에는 항상 G열(과 DB)을 먼저 백업해 두세요.
+> **큐 다시 만들기:** Apps Script 의 `extractLegacyDwrLinks()` / `extractLegacyDrqLinks()` 는 큐를 `clear()` 한 뒤 **모든** 항목(이미 DB_DWR / DB_DRQ 에 있는 PDF 포함)을 `Waiting` 으로 다시 만들고, 기존 `Done` / `Error…` 상태는 모두 지워집니다.
+> Python 스크립트가 이를 보완합니다: PDF 가 이미 DB 에 있는 `Waiting` 행(PDF Link 열의 Drive 파일 ID 로 비교)은 AI 호출 없이 `Done` 으로 표시됩니다. `--extract` 는 `--overwrite` 를 붙였을 때만 같은 동작을 하며, 붙이지 않으면 `Done` / `Error…` 행이 있는 큐는 건드리지 않습니다("큐 만들기" 참고). 큐를 덮어쓰기 전에는 항상 G열(과 DB)을 먼저 백업해 두세요.
 
 ## 설치 (최초 1회) - PowerShell
 
@@ -60,6 +61,32 @@ python migrate_queue.py --queue drq --limit 5           # DRQ 큐만 (MIGRATION_
 첫 번째 큐가 도중에 중단되면(예: Gemini 가 402/401/403 을 반환하거나 429 가 반복됨) 같은 이유로 멈출 것이므로 두 번째 큐는 건너뜁니다. 한 큐 시트를 읽지 못하면(예: 탭이 없음) 다른 큐는 계속 처리합니다. 두 경우 모두 종료 코드는 2 입니다.
 
 대상 시트는 **환경 변수 `PMIS_SPREADSHEET_ID` 로만** 지정합니다. 코드에 기본값이 없고 명령줄 옵션도 없으며, 변수가 없거나 비어 있으면 안내 메시지와 함께 멈춥니다 (`--dry-run` 포함 모든 모드). ID 는 시트 URL 에서 `/d/` 와 `/edit` 사이의 값입니다: `https://docs.google.com/spreadsheets/d/<ID>/edit`.
+
+## 큐 만들기: `--extract`
+
+`extractLegacyDwrLinks()` / `extractLegacyDrqLinks()` 를 대체합니다. Sheets API 로 옛 시트(값, 하이퍼링크, 날짜 서식)를 읽어 `MIGRATION_QUEUE` / `MIGRATION_QUEUE_DRQ` 에 기록하며, 규칙은 Apps Script 와 같습니다.
+
+- 3행이 헤더, 4행부터 데이터입니다. Date(B열)가 비어 있는 행은 건너뛰고, B열의 하이퍼링크가 `Folder URL` 이 됩니다.
+- E열부터 **BD**열(DWR) 또는 **BF**열(DRQ)까지 값이 있는 칸마다 한 항목입니다. 열 헤더에서 `(P)` / `(C)` 를 뗀 것이 `Discipline` 이고, 헤더에 `(C)` 가 있으면 `Status(C/P)` 는 `C`, 아니면 `P` 입니다.
+- `Doc No` = A열 + `-` + Discipline + `-` + 칸 값 이며, 그 칸의 하이퍼링크가 `PDF URL` 입니다.
+- Date + Discipline + 칸 값이 같으면 하나의 항목입니다. `(C)` 칸이 다시 나오면 그 링크(있을 때)가 PDF URL 을 대체하고 항목은 `C` 가 됩니다.
+- 모든 행은 `Waiting` 으로 시작합니다.
+
+옛 시트의 탭 이름은 코드에 **없습니다**. 스프레드시트에 보이는 그대로(괄호와 공백 포함) 환경 변수로 지정하세요.
+
+```powershell
+$env:PMIS_LEGACY_DWR_SHEET = "<DWR 탭 이름>"
+$env:PMIS_LEGACY_DRQ_SHEET = "<DRQ 탭 이름>"
+python migrate_queue.py --extract --dry-run     # 옛 시트를 읽어 개수와 샘플 행만 표시 (아무것도 쓰지 않음)
+python migrate_queue.py --extract               # 두 큐 모두 생성
+python migrate_queue.py --extract --queue drq   # 한 큐만 (그 큐의 탭 이름 변수만 있으면 됨)
+```
+
+- `--extract` 는 `GEMINI_API_KEY` 도 Drive 접근도 필요 없고, `--limit` 은 무시하며, `--only-rows` / `--check-access` 와 함께 쓸 수 없습니다.
+- 큐마다 고유 항목 수, PDF 링크가 없는 항목 수(이 행들은 이식할 때 `Error: No URL` 이 됨), 헤더가 비어 건너뛴 칸 수를 콘솔에 보여 줍니다.
+- **안전장치:** 큐에 이미 `Done` / `Error…` 행이 있으면 `--extract` 는 아무것도 쓰지 않고 종료 코드 2 로 끝납니다. 그래도 다시 만들려면 `--overwrite` 를 붙이세요(Apps Script 처럼 모든 행이 `Waiting` 이 됩니다). `Waiting` 행만 있는 큐는 바로 다시 만들 수 있습니다.
+- Apps Script 와 다른 점: 큐 값을 일반 텍스트(`RAW`)로 기록하므로 날짜·숫자·앞자리 0 이 자동 변환되지 않고, 큐 시트의 값만 지우며(서식은 유지), 행을 append 로 추가하므로 시트가 알아서 늘어납니다.
+- 서비스 계정에는 스프레드시트 **편집자(Editor)** 권한이 필요합니다(옛 탭을 읽고 큐 탭에 기록). PDF 는 건드리지 않습니다.
 
 ## `--check-access` 가 확인하는 것
 

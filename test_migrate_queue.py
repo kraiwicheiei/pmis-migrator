@@ -528,7 +528,7 @@ def test_zero_rows_when_everything_is_done_lists_the_statuses():
     w = world(["Done", "Done", "Done"])
     logs = run_logs(w)
     assert any("Rows to process: 0" in m for m in logs)
-    assert any("'Done'×3" in m and "'Waiting'" in m for m in logs) and any("Every row is already Done" in m for m in logs)
+    assert any("'Done'×3" in m and "'Waiting'" in m for m in logs) and any("Every row is already Done" in m and "--extract --overwrite" in m for m in logs)
 
 
 def test_zero_rows_with_unexpected_status_text_shows_it_exactly():
@@ -902,3 +902,376 @@ def test_english_hints_in_the_sheet_cells():
     assert "cover capture failed" in cells["Cover capture failed"]
     assert "retried 1x" in cells["JSON Parse, truncated, retried"] and "the answer was cut off at the output token limit" in cells["JSON Parse, truncated, retried"]
     assert "[middle omitted]" in cells["JSON Parse, truncated, retried"]
+
+
+# ---------------------------------------------------------------------------
+# --extract : 옛 시트 -> 큐 / legacy sheet -> queue / ชีตเก่า -> คิว
+# (Code_Migration.js 의 extractLegacyDwrLinks / extractLegacyDrqLinks 와 같은 결과인지 확인)
+# [TH] (ตรวจว่าผลลัพธ์เหมือน extractLegacyDwrLinks / extractLegacyDrqLinks ใน Code_Migration.js)
+# [EN] (checks that the result matches extractLegacyDwrLinks / extractLegacyDrqLinks in Code_Migration.js)
+# ---------------------------------------------------------------------------
+import datetime  # noqa: E402
+
+
+def serial(y, m, d):
+    return (datetime.date(y, m, d) - datetime.date(1899, 12, 30)).days
+
+
+def txt(s):
+    return {"effectiveValue": {"stringValue": s}, "formattedValue": s}
+
+
+def num(n, fmt=None):
+    cell = {"effectiveValue": {"numberValue": n}, "formattedValue": str(n)}
+    if fmt:
+        cell["effectiveFormat"] = {"numberFormat": {"type": fmt}}
+    return cell
+
+
+def linked(cell, url):
+    return {**cell, "hyperlink": url}
+
+
+def mk(cells):
+    """{열 index: 셀} -> 0열부터 빈 칸 {} 으로 채운 목록 / [TH] {index คอลัมน์: เซลล์} -> รายการที่เติม {} ตั้งแต่คอลัมน์ 0 / [EN] {column index: cell} -> list padded with {} from column 0"""
+    return [cells.get(i, {}) for i in range(max(cells) + 1)] if cells else []
+
+
+LEGACY_HEADER = mk({0: txt("No."), 1: txt("Date"), 4: txt("CIV(P)"), 5: txt("CIV(C)"), 6: txt("ELE(P)"),
+                    7: txt("REM (DMS)(P)"), 8: txt(""), 56: txt("OTH(P)")})
+
+
+def legacy_grid():
+    return {
+        3: LEGACY_HEADER,
+        # E(P) 와 F(C) 가 같은 키 -> 한 항목으로 합쳐지고 (C) 의 링크가 이김. 5 는 숫자 칸, I 열은 헤더가 비어 건너뜀
+        # [TH] E(P) กับ F(C) คีย์เดียวกัน -> รวมเป็นรายการเดียวและลิงก์ของ (C) ชนะ, 5 คือช่องตัวเลข, คอลัมน์ I หัวว่างจึงข้าม
+        # [EN] E(P) and F(C) share a key -> merged into one item, the (C) link wins; 5 is a numeric cell; column I has an empty header so it is skipped
+        4: mk({0: txt("R-001"), 1: linked(num(serial(2025, 11, 28), "DATE"), FOLDER), 4: linked(txt("001"), URL(1)),
+               5: linked(txt("001"), URL(2)), 6: num(5.0), 7: txt("9"), 8: txt("junk")}),
+        # Date 가 비어 있는 행은 건너뜀 / [TH] แถวที่ Date ว่างถูกข้าม / [EN] A row with an empty Date is skipped
+        5: mk({0: txt("R-002"), 4: linked(txt("002"), URL(9))}),
+        # BE열(index 56)은 DWR 범위(E~BD) 밖, DRQ 범위(E~BF) 안
+        # [TH] คอลัมน์ BE (index 56) อยู่นอกช่วง DWR (E~BD) แต่อยู่ในช่วง DRQ (E~BF)
+        # [EN] Column BE (index 56) is outside the DWR range (E~BD) but inside the DRQ range (E~BF)
+        6: mk({0: txt("R-003"), 1: txt("2025-11-29"), 4: linked(txt("003"), URL(3)), 56: txt("OTH-1")}),
+    }
+
+
+DWR_ROWS = [
+    ["R-001-CIV-001", "2025-11-28", "CIV", URL(2), FOLDER, "C", "Waiting"],
+    ["R-001-ELE-5", "2025-11-28", "ELE", "", FOLDER, "P", "Waiting"],
+    ["R-001-REM (DMS)-9", "2025-11-28", "REM (DMS)", "", FOLDER, "P", "Waiting"],
+    ["R-003-CIV-003", "2025-11-29", "CIV", URL(3), "", "P", "Waiting"],
+]
+DRQ_ROWS = DWR_ROWS + [["R-003-OTH-OTH-1", "2025-11-29", "OTH", "", "", "P", "Waiting"]]
+LEGACY_TABS = {"dwr": "LEGACY-DWR", "drq": "LEGACY-DRQ"}
+
+
+class FakeLegacy:
+    """
+    옛 시트(셀 단위) + 큐 시트가 들어 있는 가짜 스프레드시트
+    [TH] สเปรดชีตจำลองที่มีชีตเก่า (ระดับเซลล์) + ชีตคิว
+    [EN] Fake spreadsheet holding the legacy sheets (cell level) + the queue sheets
+    """
+
+    def __init__(self, grids=None, queues=None, row_count=12):
+        self.grids = grids if grids is not None else {"LEGACY-DWR": legacy_grid(), "LEGACY-DRQ": legacy_grid()}
+        self.queues = queues if queues is not None else {}
+        self.row_count = row_count
+        self.events = []
+        self.grid_reads = []
+        self.written = []
+
+    def tab_names(self):
+        return list(self.grids) + list(self.queues)
+
+    def sheets_request(self, method, url, **kw):
+        path, params = urllib.parse.unquote(url), kw.get("params") or {}
+        base = f"{mq.SHEETS_BASE}/SID"
+        if method == "GET" and path == base:
+            if params.get("fields") == "properties.title":
+                return Resp(200, {"properties": {"title": "Example Spreadsheet"}})
+            if "includeGridData" in params:
+                m = re.fullmatch(r"'(.+)'!A(\d+):([A-Z]+)(\d+)", params["ranges"])
+                tab, r1, col, r2 = m.group(1).replace("''", "'"), int(m.group(2)), m.group(3), int(m.group(4))
+                self.grid_reads.append((tab, r1, col, r2))
+                rows = [self.grids[tab].get(r, []) for r in range(r1, r2 + 1)]
+                while rows and not rows[-1]:        # 실제 API 처럼 뒤쪽의 빈 행은 생략 / [TH] ตัดแถวว่างท้ายออกเหมือน API จริง / [EN] trailing empty rows are omitted, like the real API
+                    rows.pop()
+                block = {"startRow": r1 - 1, "rowData": [{"values": r} if r else {} for r in rows]}
+                return Resp(200, {"sheets": [{"data": [block]}]})
+            return Resp(200, {"sheets": [{"properties": {"sheetId": i, "title": t, "gridProperties": {"rowCount": self.row_count}}}
+                                          for i, t in enumerate(self.tab_names())]})
+        if method == "GET" and "/values/" in path:
+            tab = re.match(r"'(.+)'!A:G$", path.split("/values/")[1]).group(1)
+            return Resp(200, {"values": self.queues[tab]}) if tab in self.queues else Resp(400, text="Unable to parse range")
+        if method == "POST" and path == base + ":batchUpdate":
+            title = kw["json"]["requests"][0]["addSheet"]["properties"]["title"]
+            self.events.append(("addSheet", title))
+            self.queues[title] = []
+            return Resp(200, {})
+        if method == "POST" and path.endswith(":clear"):
+            tab = path.split("/values/")[1][:-len(":clear")].strip("'")
+            self.events.append(("clear", tab))
+            self.queues[tab] = []
+            return Resp(200, {})
+        if method == "PUT" and "/values/" in path:
+            assert params["valueInputOption"] == "RAW"
+            tab = re.match(r"'(.+)'!A1:G1$", path.split("/values/")[1]).group(1)
+            self.events.append(("header", tab))
+            self.queues[tab] = [list(kw["json"]["values"][0])]
+            self.written += kw["json"]["values"]
+            return Resp(200, {})
+        if method == "POST" and path.endswith(":append"):
+            assert params["valueInputOption"] == "RAW" and params["insertDataOption"] == "INSERT_ROWS"
+            tab = re.match(r"'(.+)'!A1:append$", path.split("/values/")[1]).group(1)
+            rows = kw["json"]["values"]
+            self.events.append(("append", tab, len(rows)))
+            self.queues[tab].extend(rows)
+            self.written += rows
+            return Resp(200, {})
+        raise AssertionError((method, url, params))
+
+    def clients(self):
+        class S:
+            def __init__(self, fn):
+                self.request = fn
+
+        return mq.Clients(sheets=S(self.sheets_request), drive_factory=None, gemini=None, api_key="", sa_email="sa@x")
+
+
+def xargs(**over):
+    base = dict(legacy_tabs=dict(LEGACY_TABS), overwrite=False)
+    base.update(over)
+    return ns(**base)
+
+
+def extract_logs(w, key="dwr", **over):
+    logs = []
+    summary = mq.extract_queue(xargs(queue=key, **over), w.clients(), key, log=logs.append)
+    return summary, logs
+
+
+# --- 셀 변환 / cell conversion / การแปลงเซลล์ ---
+def test_sheet_cell_text_follows_apps_script_to_string_rules():
+    t = mq.sheet_cell_text
+    assert t(txt("  abc ")) == "abc" and t(txt("")) == "" and t({}) == ""
+    assert t(num(123.0)) == "123" and t(num(1.5)) == "1.5" and t(num(0)) == ""       # 0 은 거짓 -> 빈 값 / [TH] 0 เป็น falsy -> ว่าง / [EN] 0 is falsy -> empty
+    assert t({"effectiveValue": {"boolValue": True}}) == "true" and t({"effectiveValue": {"boolValue": False}}) == ""
+    d = serial(2025, 11, 28)
+    assert t(num(d, "DATE")) == "2025-11-28" and t(num(d + 0.75, "DATE_TIME")) == "2025-11-28"
+    assert t(num(d)) == str(d)                     # 날짜 서식이 아니면 숫자 그대로 / [TH] ไม่ใช่รูปแบบวันที่ก็เป็นตัวเลขตามเดิม / [EN] without a date format it stays a number
+    assert t({"effectiveValue": {"errorValue": {"type": "REF"}}, "formattedValue": "#REF!"}) == "#REF!"
+
+
+def test_sheet_cell_link_has_the_same_priority_as_getSafeLink():
+    f = mq.sheet_cell_link
+    run = [{"startIndex": 1, "format": {"link": {"uri": "https://run"}}}]
+    assert f({"hyperlink": "https://cell", "textFormatRuns": run, "userEnteredValue": {"formulaValue": '=HYPERLINK("https://f","x")'}}) == "https://cell"
+    assert f({"textFormatRuns": [{"format": {}}] + run, "userEnteredValue": {"formulaValue": '=HYPERLINK("https://f","x")'}}) == "https://run"
+    assert f({"userEnteredValue": {"formulaValue": '=hyperlink( "https://f/1" ; "x")'}}) == "https://f/1"
+    assert f({"userEnteredValue": {"formulaValue": "=HYPERLINK('https://f/2','x')"}}) == "https://f/2"
+    assert f({"userEnteredValue": {"formulaValue": "=HYPERLINK(A1,B1)"}}) == "" and f(txt("plain")) == "" and f({}) == ""
+
+
+# --- 항목 만들기 규칙 / item rules / กฎการสร้างรายการ ---
+def build(key, grid=None):
+    grid = grid or legacy_grid()
+    spec = mq.SPECS[key]
+    items, stats = mq.build_queue_items(grid[3], sorted((n, c) for n, c in grid.items() if n >= 4), spec.legacy_end_col)
+    return [it.to_row() for it in items], stats
+
+
+def test_build_queue_items_matches_the_apps_script_rules():
+    rows, stats = build("dwr")
+    assert rows == DWR_ROWS
+    # 병합 1건, 헤더 없는 칸 1개, 링크 없는 항목 2개 / [TH] รวม 1, ช่องหัวว่าง 1, รายการไม่มีลิงก์ 2 / [EN] 1 merged, 1 cell with no header, 2 items without a link
+    assert (stats.rows, stats.dated_rows, stats.merged, stats.no_discipline, stats.no_link) == (3, 2, 1, 1, 2)
+
+
+def test_drq_scans_two_more_columns_than_dwr():
+    assert mq.SPECS["dwr"].legacy_end_col == 56 and mq.SPECS["drq"].legacy_end_col == 58      # BD / BF
+    assert build("drq")[0] == DRQ_ROWS
+
+
+def test_duplicate_cells_merge_like_the_apps_script():
+    def one(header, cells):
+        grid = {3: mk(header), 4: mk({0: txt("R-001"), 1: txt("2025-11-28"), **cells})}
+        rows, stats = build("dwr", grid)
+        return rows, stats.merged
+
+    pc = {0: txt("No."), 1: txt("Date"), 4: txt("CIV(P)"), 5: txt("CIV(C)")}
+    cp = {0: txt("No."), 1: txt("Date"), 4: txt("CIV(C)"), 5: txt("CIV(P)")}
+    # (P) 다음에 (C): (C) 의 링크가 있으면 덮어씀 / [TH] (P) แล้วตามด้วย (C): ถ้า (C) มีลิงก์จะเขียนทับ / [EN] (P) then (C): the (C) link overwrites when present
+    rows, merged = one(pc, {4: linked(txt("001"), URL(1)), 5: linked(txt("001"), URL(2))})
+    assert merged == 1 and len(rows) == 1 and rows[0][3] == URL(2) and rows[0][5] == "C"
+    # (C) 에 링크가 없으면 기존 링크를 유지하고 완료만 표시 / [TH] (C) ไม่มีลิงก์ -> เก็บลิงก์เดิม แค่ทำเครื่องหมายเสร็จ / [EN] a (C) without a link keeps the old link and only marks it completed
+    rows, _ = one(pc, {4: linked(txt("001"), URL(1)), 5: txt("001")})
+    assert rows[0][3] == URL(1) and rows[0][5] == "C"
+    # (C) 다음에 (P): (P) 는 아무것도 덮어쓰지 않음 / [TH] (C) แล้วตามด้วย (P): (P) ไม่เขียนทับอะไร / [EN] (C) then (P): the (P) overwrites nothing
+    rows, merged = one(cp, {4: linked(txt("001"), URL(1)), 5: linked(txt("001"), URL(2))})
+    assert merged == 1 and rows[0][3] == URL(1) and rows[0][5] == "C"
+    # 값이 다르면 서로 다른 항목 / [TH] ค่าในช่องต่างกันคือคนละรายการ / [EN] different cell values are different items
+    rows, merged = one(pc, {4: txt("001"), 5: txt("002")})
+    assert merged == 0 and [r[0] for r in rows] == ["R-001-CIV-001", "R-001-CIV-002"]
+
+
+# --- 읽고 쓰기 / read and write / อ่านและเขียน ---
+def test_extract_creates_the_queue_with_header_waiting_rows_and_raw_values():
+    w = FakeLegacy()
+    summary, logs = extract_logs(w)
+    assert w.queues["MIGRATION_QUEUE"] == [mq.QUEUE_HEADER] + DWR_ROWS
+    assert [e[0] for e in w.events] == ["addSheet", "clear", "header", "append"]
+    assert (summary.items, summary.completed, summary.written, summary.created_tab) == (4, 1, 4, True)
+    assert not NON_ENGLISH.search(json.dumps(w.written, ensure_ascii=False))     # 시트에 쓰는 값은 영어 / [TH] ค่าที่เขียนลงชีตเป็นภาษาอังกฤษ / [EN] values written to the sheet are English
+    assert any("Wrote queue MIGRATION_QUEUE: 4 rows" in m for m in logs) and any("2 items have no PDF link" in m for m in logs)
+
+
+def test_extract_drq_uses_its_own_tab_columns_and_queue():
+    w = FakeLegacy()
+    extract_logs(w, "drq")
+    assert w.queues["MIGRATION_QUEUE_DRQ"] == [mq.QUEUE_HEADER] + DRQ_ROWS and "MIGRATION_QUEUE" not in w.queues
+
+
+def test_extract_reuses_an_existing_queue_tab_without_creating_it():
+    w = FakeLegacy(queues={"MIGRATION_QUEUE": [mq.QUEUE_HEADER, ["old", "", "", "", "", "P", "Waiting"]]})
+    summary, _ = extract_logs(w)
+    assert not summary.created_tab and ("addSheet", "MIGRATION_QUEUE") not in w.events
+    assert w.queues["MIGRATION_QUEUE"] == [mq.QUEUE_HEADER] + DWR_ROWS               # Waiting 뿐이면 덮어써도 잃을 게 없음 / [TH] มีแต่ Waiting เขียนทับได้ ไม่เสียอะไร / [EN] only Waiting rows, nothing to lose
+
+
+def test_extract_dry_run_reads_but_writes_nothing():
+    w = FakeLegacy()
+    summary, logs = extract_logs(w, dry_run=True)
+    assert w.events == [] and w.queues == {} and w.grid_reads
+    assert summary.items == 4 and summary.written == 0
+    assert any("--dry-run" in m and "new tab" in m for m in logs) and any("sample: R-001-CIV-001" in m for m in logs)
+
+
+def test_extract_refuses_to_wipe_processed_rows_unless_overwrite():
+    existing = [mq.QUEUE_HEADER, qrow(1, "Done"), qrow(2, "Error: Drive Access | x"), qrow(3, "Waiting"), qrow(4, "Done")]
+    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in existing]})
+    summary, logs = extract_logs(w)
+    assert summary.refused == "Done 2, Error 1" and summary.written == 0
+    assert w.events == [] and w.queues["MIGRATION_QUEUE"] == existing                    # 아무것도 바뀌지 않음 / [TH] ไม่เปลี่ยนอะไรเลย / [EN] nothing changed
+    assert any("--overwrite" in m for m in logs)
+    summary, logs = extract_logs(w, overwrite=True)
+    assert summary.refused == "" and summary.written == 4 and w.queues["MIGRATION_QUEUE"] == [mq.QUEUE_HEADER] + DWR_ROWS
+    assert any("--overwrite: the existing statuses (Done 2, Error 1)" in m for m in logs)
+
+
+def test_extract_with_no_items_leaves_the_queue_alone():
+    empty = {"LEGACY-DWR": {3: LEGACY_HEADER, 4: mk({0: txt("R-1"), 4: txt("x")})}, "LEGACY-DRQ": {}}
+    w = FakeLegacy(grids=empty, queues={"MIGRATION_QUEUE": [mq.QUEUE_HEADER, qrow(1, "Done")]})
+    summary, logs = extract_logs(w)
+    assert summary.items == 0 and w.events == [] and w.queues["MIGRATION_QUEUE"] == [mq.QUEUE_HEADER, qrow(1, "Done")]
+    assert any("No items found -> the MIGRATION_QUEUE queue is left untouched" in m for m in logs)
+    _, logs = extract_logs(FakeLegacy(grids=empty), "drq")
+    assert any("row 3, the header row, is empty" in m for m in logs)                    # 헤더 행이 비어 있다는 힌트 / [TH] บอกใบ้ว่าหัวตารางว่าง / [EN] hint that the header row is empty
+
+
+def test_extract_reads_and_writes_in_chunks(monkeypatch):
+    monkeypatch.setattr(mq, "EXTRACT_ROWS_PER_READ", 2)
+    monkeypatch.setattr(mq, "EXTRACT_ROWS_PER_WRITE", 3)
+    w = FakeLegacy(row_count=7)
+    extract_logs(w, "drq")
+    assert [(r1, r2) for _, r1, _, r2 in w.grid_reads] == [(3, 4), (5, 6), (7, 7)]
+    assert all(col == "BF" for _, _, col, _ in w.grid_reads)
+    assert [e[2] for e in w.events if e[0] == "append"] == [3, 2]
+    assert w.queues["MIGRATION_QUEUE_DRQ"] == [mq.QUEUE_HEADER] + DRQ_ROWS               # 나눠 읽고 써도 결과는 같음 / [TH] อ่านและเขียนแบบแบ่งก็ได้ผลเท่าเดิม / [EN] chunked reads/writes give the same result
+
+
+def test_extract_quotes_unusual_tab_names():
+    tab = "Legacy (DWR) 'old'"
+    w = FakeLegacy(grids={tab: legacy_grid()})
+    mq.extract_queue(xargs(queue="dwr", legacy_tabs={"dwr": tab}), w.clients(), "dwr", log=lambda m: None)
+    assert w.grid_reads[0][0] == tab and w.queues["MIGRATION_QUEUE"][1:] == DWR_ROWS
+
+
+def test_extract_missing_legacy_tab_names_the_tabs_and_other_queue_still_runs():
+    w = FakeLegacy(grids={"LEGACY-DRQ": legacy_grid()})
+    logs = []
+    code = mq.run_extract(xargs(queue=None), w.clients(), ["dwr", "drq"], log=logs.append, sheet_title="Example Spreadsheet")
+    text = "\n".join(logs)
+    assert code == 2 and "tab 'LEGACY-DWR' not found" in text and "LEGACY-DRQ" in text and "PMIS_LEGACY_DWR_SHEET" in text
+    assert w.queues["MIGRATION_QUEUE_DRQ"][1:] == DRQ_ROWS and "MIGRATION_QUEUE" not in w.queues
+    assert "sheet: Example Spreadsheet" in text
+
+
+def test_run_extract_exit_codes():
+    existing = [mq.QUEUE_HEADER, qrow(1, "Done")]
+    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in existing]})
+    assert mq.run_extract(xargs(queue="dwr"), w.clients(), ["dwr"], log=lambda m: None) == 2                 # 쓰지 않고 거부 / [TH] ปฏิเสธไม่เขียน / [EN] refused, nothing written
+    assert mq.run_extract(xargs(queue="dwr", dry_run=True), w.clients(), ["dwr"], log=lambda m: None) == 0   # dry-run 은 0 / [TH] dry-run คืน 0 / [EN] dry-run returns 0
+    assert mq.run_extract(xargs(queue="dwr", overwrite=True), w.clients(), ["dwr"], log=lambda m: None) == 0
+
+
+# --- 설정 / CLI ---
+def test_legacy_sheet_names_come_only_from_the_environment():
+    env = {"PMIS_LEGACY_DWR_SHEET": "Tab (DWR)", "PMIS_LEGACY_DRQ_SHEET": "  "}
+    assert mq.require_legacy_sheet_names(["dwr"], env) == {"dwr": "Tab (DWR)"}
+    with pytest.raises(SystemExit) as e:
+        mq.require_legacy_sheet_names(["dwr", "drq"], env)
+    msg = str(e.value.code)
+    assert "PMIS_LEGACY_DRQ_SHEET" in msg and "PMIS_LEGACY_DWR_SHEET" not in msg and '$env:PMIS_LEGACY_DRQ_SHEET = "<' in msg
+    assert not hasattr(mq.build_parser().parse_args([]), "legacy_sheet")           # 명령줄 옵션 없음 / [TH] ไม่มีออปชันบรรทัดคำสั่ง / [EN] no command-line option
+
+
+def extract_main(monkeypatch, argv, w=None, env=None, need=None):
+    w = w or FakeLegacy()
+    monkeypatch.setenv("PMIS_SPREADSHEET_ID", "SID")
+    for name in ("PMIS_LEGACY_DWR_SHEET", "PMIS_LEGACY_DRQ_SHEET"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in (env if env is not None else {"PMIS_LEGACY_DWR_SHEET": "LEGACY-DWR", "PMIS_LEGACY_DRQ_SHEET": "LEGACY-DRQ"}).items():
+        monkeypatch.setenv(name, value)
+
+    def fake_make_clients(args, need_gemini):
+        if need is not None:
+            need.append(need_gemini)
+        return w.clients()
+
+    monkeypatch.setattr(mq, "make_clients", fake_make_clients)
+    return mq.main(argv), w
+
+
+def test_main_extract_builds_both_queues_without_a_gemini_key(monkeypatch, capsys):
+    need = []
+    code, w = extract_main(monkeypatch, ["--extract"], need=need)
+    out = capsys.readouterr().out
+    assert code == 0 and need == [False]
+    assert w.queues["MIGRATION_QUEUE"][1:] == DWR_ROWS and w.queues["MIGRATION_QUEUE_DRQ"][1:] == DRQ_ROWS
+    assert out.index("Build queue DWR") < out.index("Build queue DRQ") and "sheet: Example Spreadsheet (SID)" in out and "model:" not in out
+
+
+def test_main_extract_one_queue_needs_only_its_own_tab_name(monkeypatch):
+    code, w = extract_main(monkeypatch, ["--extract", "--queue", "drq"], env={"PMIS_LEGACY_DRQ_SHEET": "LEGACY-DRQ"})
+    assert code == 0 and list(w.queues) == ["MIGRATION_QUEUE_DRQ"]
+
+
+def test_main_extract_checks_tab_names_before_touching_credentials(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("make_clients must not be reached without the legacy tab names")
+
+    monkeypatch.setenv("PMIS_SPREADSHEET_ID", "SID")
+    monkeypatch.delenv("PMIS_LEGACY_DWR_SHEET", raising=False)
+    monkeypatch.delenv("PMIS_LEGACY_DRQ_SHEET", raising=False)
+    monkeypatch.setattr(mq, "make_clients", boom)
+    with pytest.raises(SystemExit) as e:
+        mq.main(["--extract", "--dry-run"])
+    assert "PMIS_LEGACY_DWR_SHEET" in str(e.value.code) and "PMIS_LEGACY_DRQ_SHEET" in str(e.value.code)
+
+
+def test_main_extract_dry_run_and_flag_conflicts(monkeypatch):
+    code, w = extract_main(monkeypatch, ["--extract", "--dry-run"])
+    assert code == 0 and w.queues == {} and w.events == []
+    for argv in (["--extract", "--only-rows", "5", "--queue", "dwr"], ["--extract", "--check-access"], ["--overwrite"]):
+        with pytest.raises(SystemExit) as e:
+            extract_main(monkeypatch, argv)
+        assert "--extract" in str(e.value.code) or "--overwrite" in str(e.value.code)
+
+
+def test_the_normal_run_is_unchanged_without_extract(monkeypatch, capsys):
+    rec = RunRecorder()
+    assert main_with(monkeypatch, ["--queue", "dwr"], rec) == 0 and rec.calls == [("dwr", True, 30)]
+    assert "model:" in capsys.readouterr().out

@@ -5,16 +5,17 @@
 แทน `runDwrAiMigrationTurbo` / `runDrqAiMigrationTurbo` ใน `Code_Migration.js` โดยใช้ prompt, โมเดล (`gemini-3.8-flash`)
 และลำดับคอลัมน์ DB_DWR / DB_DRQ ชุดเดิมทุกอย่าง แต่รันบนเครื่องคุณ จึงไม่ติดโควตา UrlFetch ของ Apps Script
 ทำตามโค้ด Apps Script ฉบับปัจจุบัน (`Code_Migration.js` และ `extractDriveFileForAI` ใน `Code_Core.js` สำหรับ PDF ขนาดใหญ่)
+และยังแทน `extractLegacyDwrLinks` / `extractLegacyDrqLinks` ที่สร้างคิว (ดู `--extract`)
 
 ## ภาพรวม: ใครทำอะไร
 
 | ขั้นตอน | ทำที่ไหน |
 |---|---|
-| สร้างคิว `MIGRATION_QUEUE` / `MIGRATION_QUEUE_DRQ` จากชีตเก่า `<legacy DWR sheet>` / `<legacy DRQ sheet>` | **Apps Script** (`extractLegacyDwrLinks()` / `extractLegacyDrqLinks()`) - สคริปต์ Python **ไม่สร้างคิว** |
+| สร้างคิว `MIGRATION_QUEUE` / `MIGRATION_QUEUE_DRQ` จากชีตเก่า `<legacy DWR sheet>` / `<legacy DRQ sheet>` | **สคริปต์ Python นี้** ด้วย `--extract` (แทน `extractLegacyDwrLinks()` / `extractLegacyDrqLinks()` ของ Apps Script) |
 | โหลด PDF -> Gemini -> เขียน DB_DWR / DB_DRQ -> ตั้ง `Done` | **สคริปต์ Python นี้** |
 
-> **การรัน `extractLegacyDwrLinks()` / `extractLegacyDrqLinks()` ซ้ำ:** ใน `Code_Migration.js` ปัจจุบัน สองฟังก์ชันนี้สั่ง `clear()` แล้วสร้างคิวใหม่ทั้งหมดเป็น `Waiting` **ทุกรายการ** - รวมถึง PDF ที่อยู่ใน DB_DWR / DB_DRQ แล้ว - และล้างสถานะ `Done` / `Error…` เดิมทั้งหมด
-> สคริปต์ Python รับมือเรื่องนี้ได้: แถว `Waiting` ที่ PDF อยู่ใน DB แล้ว (เทียบด้วย Drive file ID ในคอลัมน์ PDF Link) จะถูกตั้งเป็น `Done` โดยไม่เรียก AI ควรสำรองคอลัมน์ G (และ DB) ไว้ก่อนรันสองฟังก์ชันนี้ซ้ำเสมอ
+> **การสร้างคิวใหม่:** ฟังก์ชัน `extractLegacyDwrLinks()` / `extractLegacyDrqLinks()` ของ Apps Script สั่ง `clear()` แล้วสร้างคิวใหม่ทั้งหมดเป็น `Waiting` **ทุกรายการ** - รวมถึง PDF ที่อยู่ใน DB_DWR / DB_DRQ แล้ว - และล้างสถานะ `Done` / `Error…` เดิมทั้งหมด
+> สคริปต์ Python รับมือเรื่องนี้ได้: แถว `Waiting` ที่ PDF อยู่ใน DB แล้ว (เทียบด้วย Drive file ID ในคอลัมน์ PDF Link) จะถูกตั้งเป็น `Done` โดยไม่เรียก AI ส่วน `--extract` ทำแบบเดียวกันเฉพาะเมื่อใส่ `--overwrite` ถ้าไม่ใส่ จะไม่แตะคิวที่มีแถว `Done` / `Error…` อยู่แล้ว (ดู "สร้างคิว") ควรสำรองคอลัมน์ G (และ DB) ไว้ก่อนเขียนทับคิวเสมอ
 
 ## ติดตั้ง (ครั้งเดียว) - PowerShell
 
@@ -60,6 +61,32 @@ python migrate_queue.py --queue drq --limit 5           # เฉพาะคิ�
 ถ้าคิวแรกหยุดกลางคัน (เช่น Gemini ตอบ 402/401/403 หรือติด 429 ต่อเนื่อง) จะข้ามคิวที่สองเพราะจะหยุดด้วยสาเหตุเดียวกัน แต่ถ้าอ่านชีตคิวใดคิวหนึ่งไม่ได้ (เช่นไม่มีแท็บนั้น) จะยังทำอีกคิวต่อ ทั้งสองกรณีรหัสออกของโปรแกรมเป็น 2
 
 ชีตเป้าหมายกำหนด**ผ่านตัวแปรสภาพแวดล้อม `PMIS_SPREADSHEET_ID` เท่านั้น** ไม่มีค่าเริ่มต้นในโค้ดและไม่มีออปชันบรรทัดคำสั่ง ถ้าไม่ตั้งหรือเป็นค่าว่างสคริปต์จะหยุดพร้อมข้อความแนะนำ (ทุกโหมด รวมถึง `--dry-run`) ID คือส่วนใน URL ของชีตระหว่าง `/d/` กับ `/edit`: `https://docs.google.com/spreadsheets/d/<ID>/edit`
+
+## สร้างคิว: `--extract`
+
+แทน `extractLegacyDwrLinks()` / `extractLegacyDrqLinks()` อ่านชีตเก่าผ่าน Sheets API (ค่า ไฮเปอร์ลิงก์ รูปแบบวันที่) แล้วเขียน `MIGRATION_QUEUE` / `MIGRATION_QUEUE_DRQ` ด้วยกฎเดียวกับ Apps Script:
+
+- หัวตารางอยู่แถว 3 ข้อมูลเริ่มแถว 4 ข้ามแถวที่ Date (คอลัมน์ B) ว่าง ไฮเปอร์ลิงก์ของคอลัมน์ B กลายเป็น `Folder URL`
+- ทุกช่องที่มีค่าตั้งแต่คอลัมน์ E ถึง **BD** (DWR) หรือ **BF** (DRQ) คือ 1 รายการ `Discipline` = หัวคอลัมน์ที่ตัด `(P)` / `(C)` ออก ถ้าหัวคอลัมน์มี `(C)` ค่า `Status(C/P)` เป็น `C` ไม่งั้นเป็น `P`
+- `Doc No` = คอลัมน์ A + `-` + Discipline + `-` + ค่าในช่อง ส่วนไฮเปอร์ลิงก์ของช่องนั้นคือ `PDF URL`
+- Date + Discipline + ค่าในช่องเดียวกันนับเป็นรายการเดียว ถ้าช่อง `(C)` มาซ้ำ ลิงก์ของมัน (ถ้ามี) จะแทน PDF URL และรายการกลายเป็น `C`
+- ทุกแถวเริ่มที่ `Waiting`
+
+ชื่อแท็บของชีตเก่า**ไม่ได้อยู่ในโค้ด** ให้ตั้งใน environment ตามที่เห็นในสเปรดชีตเป๊ะๆ (รวมวงเล็บและช่องว่าง):
+
+```powershell
+$env:PMIS_LEGACY_DWR_SHEET = "<ชื่อแท็บ DWR>"
+$env:PMIS_LEGACY_DRQ_SHEET = "<ชื่อแท็บ DRQ>"
+python migrate_queue.py --extract --dry-run     # อ่านชีตเก่า แสดงจำนวนและแถวตัวอย่าง ไม่เขียนอะไร
+python migrate_queue.py --extract               # สร้างทั้งสองคิว
+python migrate_queue.py --extract --queue drq   # เฉพาะคิวเดียว (ตั้งแค่ตัวแปรชื่อแท็บของคิวนั้นก็พอ)
+```
+
+- `--extract` ไม่ต้องใช้ `GEMINI_API_KEY` และไม่แตะ Drive ไม่สนใจ `--limit` และใช้ร่วมกับ `--only-rows` / `--check-access` ไม่ได้
+- คอนโซลแสดงต่อคิวว่าพบกี่รายการไม่ซ้ำ กี่รายการไม่มีลิงก์ PDF (แถวเหล่านั้นจะเป็น `Error: No URL` ตอนย้าย) และกี่ช่องที่ข้ามเพราะหัวคอลัมน์ว่าง
+- **ความปลอดภัย:** ถ้าคิวมีแถว `Done` / `Error…` อยู่แล้ว `--extract` จะไม่เขียนอะไรและจบด้วยรหัส 2 ใส่ `--overwrite` ถ้าต้องการสร้างใหม่จริงๆ (ทุกแถวกลับเป็น `Waiting` เหมือน Apps Script) คิวที่มีแต่ `Waiting` สร้างใหม่ได้เลย
+- ต่างจาก Apps Script: ค่าในคิวเขียนเป็นข้อความล้วน (`RAW`) วันที่ ตัวเลข และเลข 0 นำหน้าจึงไม่ถูกแปลง ล้างเฉพาะค่าในชีตคิว (รูปแบบเดิมยังอยู่) และเพิ่มแถวด้วย append ชีตจึงขยายเอง
+- service account ต้องมีสิทธิ์ **Editor** ในสเปรดชีต (อ่านแท็บเก่า เขียนแท็บคิว) ไฟล์ PDF ไม่ถูกแตะ
 
 ## `--check-access` เช็คอะไร
 

@@ -5,16 +5,17 @@
 Replaces `runDwrAiMigrationTurbo` / `runDrqAiMigrationTurbo` in `Code_Migration.js`. It uses the same prompts, the same model
 (`gemini-3.8-flash`) and the same DB_DWR / DB_DRQ column order, but runs on your own PC, so the Apps Script UrlFetch quotas no longer apply.
 It follows the current Apps Script (`Code_Migration.js`, and `extractDriveFileForAI` in `Code_Core.js` for large PDFs).
+It also replaces `extractLegacyDwrLinks` / `extractLegacyDrqLinks`, which build the queues (see `--extract`).
 
 ## Overview: who does what
 
 | Step | Where it runs |
 |---|---|
-| Build the `MIGRATION_QUEUE` / `MIGRATION_QUEUE_DRQ` queues from the legacy `<legacy DWR sheet>` / `<legacy DRQ sheet>` sheets | **Apps Script** (`extractLegacyDwrLinks()` / `extractLegacyDrqLinks()`). The Python script **does not create the queue** |
+| Build the `MIGRATION_QUEUE` / `MIGRATION_QUEUE_DRQ` queues from the legacy `<legacy DWR sheet>` / `<legacy DRQ sheet>` sheets | **This Python script** with `--extract` (replaces `extractLegacyDwrLinks()` / `extractLegacyDrqLinks()` in Apps Script) |
 | Download PDF -> Gemini -> write DB_DWR / DB_DRQ -> mark `Done` | **This Python script** |
 
-> **Re-running `extractLegacyDwrLinks()` / `extractLegacyDrqLinks()`:** in the current `Code_Migration.js` both functions `clear()` the queue and rebuild **every** item as `Waiting` - including PDFs that are already in DB_DWR / DB_DRQ - and every `Done` / `Error…` status is wiped.
-> The Python script covers for this: a `Waiting` row whose PDF is already in the DB (matched by the Drive file ID in the PDF Link column) is marked `Done` without calling the AI. Always back up column G (and the DB) before re-running either function.
+> **Rebuilding a queue:** the Apps Script functions `extractLegacyDwrLinks()` / `extractLegacyDrqLinks()` `clear()` the queue and rebuild **every** item as `Waiting` - including PDFs that are already in DB_DWR / DB_DRQ - and every `Done` / `Error…` status is wiped. `--extract` does the same only with `--overwrite`; without it, it refuses to touch a queue that already has `Done` / `Error…` rows (see "Build the queues").
+> Either way the Python migration covers for it: a `Waiting` row whose PDF is already in the DB (matched by the Drive file ID in the PDF Link column) is marked `Done` without calling the AI. Always back up column G (and the DB) before overwriting a queue.
 
 ## Install (once) - PowerShell
 
@@ -60,6 +61,32 @@ python migrate_queue.py --queue drq --limit 5           # only the DRQ queue (MI
 If the first queue stops early (for example Gemini answers 402/401/403, or repeated 429), the second queue is skipped because it would stop for the same reason. If one queue sheet cannot be read (for example the tab is missing), the other queue is still processed. In both cases the exit code is 2.
 
 The target sheet is set **only** through the `PMIS_SPREADSHEET_ID` environment variable. There is no default in the code and no command-line option, and the script stops with a message if the variable is missing or empty (in every mode, including `--dry-run`). The ID is the part of the sheet's URL between `/d/` and `/edit`: `https://docs.google.com/spreadsheets/d/<ID>/edit`.
+
+## Build the queues: `--extract`
+
+Replaces `extractLegacyDwrLinks()` / `extractLegacyDrqLinks()`. It reads the legacy sheet through the Sheets API (values, hyperlinks, date formats) and writes `MIGRATION_QUEUE` / `MIGRATION_QUEUE_DRQ` with the same rules as Apps Script:
+
+- The header is on row 3 and the data starts on row 4. A row whose Date (column B) is empty is skipped. The hyperlink on column B becomes `Folder URL`.
+- Every non-empty cell from column E to **BD** (DWR) or **BF** (DRQ) is one item. Its column header without `(P)` / `(C)` is the `Discipline`; a `(C)` in the header makes `Status(C/P)` = `C`, otherwise `P`.
+- `Doc No` = column A + `-` + Discipline + `-` + the cell value. The hyperlink on that cell is the `PDF URL`.
+- The same Date + Discipline + cell value is one item. When a `(C)` cell repeats it, its link (if it has one) replaces the PDF URL and the item becomes `C`.
+- Every row starts as `Waiting`.
+
+The tab names of the legacy sheets are **not** in the code. Set them in the environment, exactly as they appear in the spreadsheet (brackets and spaces included):
+
+```powershell
+$env:PMIS_LEGACY_DWR_SHEET = "<DWR tab name>"
+$env:PMIS_LEGACY_DRQ_SHEET = "<DRQ tab name>"
+python migrate_queue.py --extract --dry-run     # read the legacy sheets, show the counts and sample rows; nothing is written
+python migrate_queue.py --extract               # build both queues
+python migrate_queue.py --extract --queue drq   # only one queue (then only its own tab-name variable is needed)
+```
+
+- `--extract` needs neither `GEMINI_API_KEY` nor any Drive access, ignores `--limit`, and cannot be combined with `--only-rows` / `--check-access`.
+- For each queue the console shows how many unique items were found, how many have no PDF link (those rows become `Error: No URL` when migrated) and how many cells were skipped because their column header is empty.
+- **Safety:** if the queue already has `Done` / `Error…` rows, `--extract` writes nothing and exits with code 2. Add `--overwrite` to rebuild it anyway (every row becomes `Waiting`, as in Apps Script). A queue that only holds `Waiting` rows can be rebuilt freely.
+- Differences from Apps Script: the queue values are written as plain text (`RAW`), so dates, numbers and leading zeros are never auto-converted; only the values of the queue sheet are cleared (its formatting stays); rows are appended, so the sheet grows by itself.
+- The service account needs **Editor** access to the spreadsheet (it reads the legacy tab and writes the queue tab). The PDFs are not touched.
 
 ## What `--check-access` checks
 

@@ -9,6 +9,10 @@ MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ 큐를 내 PC 에서 Gemini 로 처리합�
 [EN] Processes the MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ queues with Gemini on your own PC
      (replaces runDwrAiMigrationTurbo / runDrqAiMigrationTurbo in Code_Migration.js).
 
+--extract: 옛 시트에서 큐를 만듭니다 (Code_Migration.js 의 extractLegacyDwrLinks / extractLegacyDrqLinks 를 대체)
+[TH] --extract: สร้างคิวจากชีตเก่า (แทน extractLegacyDwrLinks / extractLegacyDrqLinks ใน Code_Migration.js)
+[EN] --extract: builds the queues from the legacy sheets (replaces extractLegacyDwrLinks / extractLegacyDrqLinks in Code_Migration.js)
+
 기존과 동일한 점 / [TH] ทำงานเหมือนของเดิม / [EN] Same as the original:
   큐(G열 = Waiting) -> PDF 다운로드 -> Gemini(기존 프롬프트) -> DB_DWR / DB_DRQ 에 append
   -> G = Done (실패 시 G = "Error: <label> | <detail>")
@@ -58,13 +62,21 @@ Apps Script(extractDriveFileForAI)와 동일하게 맞춘 점 / [TH] ส่ว�
   PMIS_SPREADSHEET_ID             대상 스프레드시트 ID (필수, 항상. 코드에 기본값이 없고 명령줄 옵션도 없음)
                                   [TH] ID ของสเปรดชีตเป้าหมาย (จำเป็นเสมอ ไม่มีค่าเริ่มต้นในโค้ดและไม่มีออปชันบรรทัดคำสั่ง)
                                   [EN] target spreadsheet ID (always required; no default in the code and no command-line option)
+  PMIS_LEGACY_DWR_SHEET           --extract 전용: DWR 큐를 만들 옛 시트 탭 이름 (필수, 코드에 기본값 없음)
+                                  [TH] เฉพาะ --extract: ชื่อแท็บชีตเก่าที่ใช้สร้างคิว DWR (จำเป็น ไม่มีค่าเริ่มต้นในโค้ด)
+                                  [EN] --extract only: name of the legacy sheet tab the DWR queue is built from (required; no default in the code)
+  PMIS_LEGACY_DRQ_SHEET           --extract 전용: DRQ 큐를 만들 옛 시트 탭 이름 (필수, 코드에 기본값 없음)
+                                  [TH] เฉพาะ --extract: ชื่อแท็บชีตเก่าที่ใช้สร้างคิว DRQ (จำเป็น ไม่มีค่าเริ่มต้นในโค้ด)
+                                  [EN] --extract only: name of the legacy sheet tab the DRQ queue is built from (required; no default in the code)
 """
 from __future__ import annotations
 
 import argparse
 import base64
 import copy
+import datetime
 import json
+import math
 import os
 import random
 import re
@@ -176,6 +188,11 @@ class QueueSpec:
     # [TH] คีย์ใน JSON ของ AI ที่เก็บเลขเอกสาร (ใช้จับคู่กับ Doc No ของคิวเมื่อ AI ตอบกลับมาหลายรายงาน)
     # [EN] Key in the AI JSON that holds the document number (used to match the queue's Doc No when the AI returns several reports)
     no_key: str = ""
+    # --extract 전용: 옛 시트 탭 이름을 담은 환경 변수 이름 / 스캔할 마지막 열(0부터, 이 값은 포함하지 않음)
+    # [TH] เฉพาะ --extract: ชื่อตัวแปรสภาพแวดล้อมที่เก็บชื่อแท็บชีตเก่า / คอลัมน์สุดท้ายที่สแกน (เริ่ม 0 ไม่รวมค่านี้)
+    # [EN] --extract only: name of the environment variable holding the legacy tab name / end column to scan (0-based, exclusive)
+    legacy_env: str = ""
+    legacy_end_col: int = 0
 
 
 SPECS = {
@@ -194,6 +211,11 @@ SPECS = {
         ),
         db_pdf_col=17,
         no_key="DWR_No",
+        # E열(index 4) ~ BD열(index 55)
+        # [TH] คอลัมน์ E (index 4) ถึง BD (index 55)
+        # [EN] Column E (index 4) to BD (index 55)
+        legacy_env="PMIS_LEGACY_DWR_SHEET",
+        legacy_end_col=56,
     ),
     "drq": QueueSpec(
         name="DRQ",
@@ -209,6 +231,11 @@ SPECS = {
         ),
         db_pdf_col=14,
         no_key="DRQ_No",
+        # E열(index 4) ~ BF열(index 57)
+        # [TH] คอลัมน์ E (index 4) ถึง BF (index 57)
+        # [EN] Column E (index 4) to BF (index 57)
+        legacy_env="PMIS_LEGACY_DRQ_SHEET",
+        legacy_end_col=58,
     ),
 }
 
@@ -602,7 +629,7 @@ def write_statuses(sess: Any, sid: str, tab: str, updates: dict[int, str]) -> No
     _sheets_call(sess, "POST", f"{SHEETS_BASE}/{sid}/values:batchUpdate", json=body)
 
 
-def append_rows(sess: Any, sid: str, tab: str, rows: list[list]) -> None:
+def append_rows(sess: Any, sid: str, tab: str, rows: list[list], value_input: str = "USER_ENTERED") -> None:
     """
     표 끝에 추가 (행이 자동 확장됨). 5xx/타임아웃 시에는 이미 기록됐을 수 있어 재시도하지 않음 -> 중복 행 방지
     [TH] ต่อท้ายตาราง (ขยายแถวให้เอง) ไม่ retry เมื่อ 5xx/timeout เพราะอาจเขียนไปแล้ว -> กันแถวซ้ำ
@@ -612,7 +639,7 @@ def append_rows(sess: Any, sid: str, tab: str, rows: list[list]) -> None:
     url = _values_url(sid, f"'{tab}'!A1") + ":append"
     _sheets_call(
         sess, "POST", url, retry_5xx=False,
-        params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"},
+        params={"valueInputOption": value_input, "insertDataOption": "INSERT_ROWS"},
         json={"majorDimension": "ROWS", "values": rows},
     )
 
@@ -956,7 +983,7 @@ def explain_no_jobs(values: list[list[str]], sid: str, spec: QueueSpec, *, retry
     if blank_with_url and not include_blank:
         lines.append(f"{blank_with_url} rows have a blank column G but a URL - add --include-blank to process them too")
     if set(counts) <= {"Done"}:
-        lines.append("Every row is already Done - if work is still pending, rebuild the queue (extractLegacy…Links) or set the status back to Waiting")
+        lines.append("Every row is already Done - if work is still pending, rebuild the queue (--extract --overwrite) or set the status back to Waiting")
     return lines
 
 
@@ -1152,6 +1179,361 @@ def _col_letter(n: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 옛 시트 -> 큐 만들기 (--extract)
+# Code_Migration.js 의 extractLegacyDwrLinks / extractLegacyDrqLinks 를 옮긴 것
+# [TH] สร้างคิวจากชีตเก่า (--extract) - ย้ายมาจาก extractLegacyDwrLinks / extractLegacyDrqLinks ใน Code_Migration.js
+# [EN] Building the queues from the legacy sheets (--extract) - ported from
+#      extractLegacyDwrLinks / extractLegacyDrqLinks in Code_Migration.js
+# ---------------------------------------------------------------------------
+# 큐 시트의 헤더 (Apps Script 와 동일, 영어)
+# [TH] หัวตารางของชีตคิว (เหมือน Apps Script เป็นภาษาอังกฤษ)
+# [EN] Header of the queue sheet (same as Apps Script, in English)
+QUEUE_HEADER = ["Doc No", "Date", "Discipline", "PDF URL", "Folder URL", "Status(C/P)", "AI Processed"]
+# 옛 시트의 구조: 3행 = 헤더, 4행부터 데이터. A열 = No., B열 = Date(+폴더 링크), E열부터 = 분야별 칸
+# [TH] โครงสร้างชีตเก่า: แถว 3 = หัวตาราง ข้อมูลเริ่มแถว 4 คอลัมน์ A = No., B = Date (+ลิงก์โฟลเดอร์), ตั้งแต่ E = ช่องแต่ละ discipline
+# [EN] Legacy sheet layout: row 3 = header, data from row 4. Column A = No., B = Date (+ folder link), from E = one cell per discipline
+LEGACY_HEADER_ROW = 3
+LEGACY_FIRST_DATA_ROW = 4
+LEGACY_NO_COL = 0
+LEGACY_DATE_COL = 1
+LEGACY_FIRST_COL = 4
+# 한 번에 읽는 행 수 / 한 번에 쓰는 행 수 (요청 하나가 너무 커지지 않도록)
+# [TH] จำนวนแถวที่อ่านต่อครั้ง / เขียนต่อครั้ง (กัน request เดียวใหญ่เกินไป)
+# [EN] Rows read per request / written per request (keeps a single request from getting too large)
+EXTRACT_ROWS_PER_READ = 400
+EXTRACT_ROWS_PER_WRITE = 2000
+# Google Sheets 의 날짜 일련번호 기준일
+# [TH] วันอ้างอิงของ serial date ใน Google Sheets
+# [EN] Base date of Google Sheets date serial numbers
+_SHEETS_EPOCH = datetime.date(1899, 12, 30)
+# getSafeLink 와 같은 정규식
+# [TH] regex เดียวกับ getSafeLink
+# [EN] Same regex as getSafeLink
+_HYPERLINK_FORMULA = re.compile(r"""HYPERLINK\(\s*["']([^"']+)["']""", re.IGNORECASE)
+# 셀마다 필요한 필드만 요청
+# [TH] ขอเฉพาะฟิลด์ของเซลล์ที่ต้องใช้
+# [EN] Only the cell fields that are needed are requested
+_GRID_FIELDS = (
+    "sheets(data(startRow,rowData(values(effectiveValue,formattedValue,hyperlink,"
+    "userEnteredValue(formulaValue),textFormatRuns(format(link(uri))),effectiveFormat(numberFormat(type))))))"
+)
+
+
+def sheet_cell_text(cell: dict) -> str:
+    """
+    Apps Script 의 `v ? v.toString().trim() : ""` 와 같은 규칙으로 셀 값을 문자열로 변환
+    (0 / false / 빈 값 = 빈 문자열, 날짜 서식 셀 = yyyy-MM-dd, 정수는 소수점 없이)
+    [TH] แปลงค่าเซลล์เป็นข้อความตามกฎเดียวกับ `v ? v.toString().trim() : ""` ของ Apps Script
+         (0 / false / ว่าง = ข้อความว่าง, เซลล์รูปแบบวันที่ = yyyy-MM-dd, จำนวนเต็มไม่มีทศนิยม)
+    [EN] Converts a cell value to text with the same rules as Apps Script's `v ? v.toString().trim() : ""`
+         (0 / false / empty = empty string, date-formatted cell = yyyy-MM-dd, integers without a decimal point)
+    """
+    ev = cell.get("effectiveValue") or {}
+    if "errorValue" in ev:
+        return str(cell.get("formattedValue", "")).strip()
+    if "stringValue" in ev:
+        return str(ev["stringValue"]).strip()
+    if "boolValue" in ev:
+        return "true" if ev["boolValue"] else ""
+    if "numberValue" in ev:
+        num = float(ev["numberValue"])
+        if num == 0:
+            return ""
+        fmt = ((cell.get("effectiveFormat") or {}).get("numberFormat") or {}).get("type", "")
+        if fmt in ("DATE", "DATE_TIME"):
+            return (_SHEETS_EPOCH + datetime.timedelta(days=math.floor(num))).isoformat()
+        return str(int(num)) if num.is_integer() else repr(num)
+    return ""
+
+
+def sheet_cell_link(cell: dict) -> str:
+    """
+    getSafeLink 와 같은 우선순위: 셀 전체 링크 -> 일부 텍스트의 링크 -> HYPERLINK("...") 수식
+    [TH] ลำดับเดียวกับ getSafeLink: ลิงก์ทั้งเซลล์ -> ลิงก์ของข้อความบางส่วน -> สูตร HYPERLINK("...")
+    [EN] Same priority as getSafeLink: whole-cell link -> link on part of the text -> HYPERLINK("...") formula
+    """
+    url = cell.get("hyperlink")
+    if url:
+        return str(url)
+    for run in cell.get("textFormatRuns") or []:
+        uri = ((run.get("format") or {}).get("link") or {}).get("uri")
+        if uri:
+            return str(uri)
+    formula = (cell.get("userEnteredValue") or {}).get("formulaValue") or ""
+    m = _HYPERLINK_FORMULA.search(formula)
+    return m.group(1) if m else ""
+
+
+@dataclass
+class LegacyItem:
+    doc_no: str
+    date: str
+    discipline: str
+    pdf_url: str
+    folder_url: str
+    completed: bool
+
+    def to_row(self) -> list:
+        return [self.doc_no, self.date, self.discipline, self.pdf_url, self.folder_url, "C" if self.completed else "P", "Waiting"]
+
+
+@dataclass
+class ExtractStats:
+    rows: int = 0          # 읽은 데이터 행 / [TH] แถวข้อมูลที่อ่าน / [EN] data rows read
+    dated_rows: int = 0    # Date 가 있는 행 / [TH] แถวที่มี Date / [EN] rows that have a Date
+    merged: int = 0        # 중복이라 합친 칸 / [TH] ช่องที่ซ้ำและรวมแล้ว / [EN] cells merged as duplicates
+    no_discipline: int = 0  # 헤더가 비어 있어 건너뛴 칸 / [TH] ช่องที่ข้ามเพราะหัวคอลัมน์ว่าง / [EN] cells skipped because the column header is empty
+    no_link: int = 0       # PDF 링크가 없는 항목 / [TH] รายการที่ไม่มีลิงก์ PDF / [EN] items without a PDF link
+
+
+def build_queue_items(header_cells: list, data_rows: Any, end_col: int) -> tuple[list[LegacyItem], ExtractStats]:
+    """
+    extractLegacyDwrLinks / extractLegacyDrqLinks 의 본문과 같은 규칙:
+      * Date(B열)가 비어 있는 행은 건너뜀
+      * E열 ~ end_col 직전 열의 값이 있는 칸마다 한 항목. 헤더에서 (P)/(C) 를 떼어 낸 것이 Discipline, (C) 가 있으면 완료
+      * 키 = Date_Discipline_칸 값. 같은 키가 또 나오면 새 항목을 만들지 않고, 그것이 (C) 이면 PDF 링크(있을 때)와 완료 표시를 덮어씀
+      * Doc No = A열 + "-" + Discipline + "-" + 칸 값
+    [TH] กฎเดียวกับตัวฟังก์ชัน extractLegacyDwrLinks / extractLegacyDrqLinks:
+         * ข้ามแถวที่ Date (คอลัมน์ B) ว่าง
+         * ทุกช่องที่มีค่าในคอลัมน์ E ถึงก่อน end_col = 1 รายการ Discipline = หัวคอลัมน์ที่ตัด (P)/(C) ออก, ถ้ามี (C) ถือว่าเสร็จ
+         * คีย์ = Date_Discipline_ค่าในช่อง ถ้าคีย์ซ้ำจะไม่สร้างรายการใหม่ แต่ถ้าเป็น (C) จะเขียนทับลิงก์ PDF (ถ้ามี) และทำเครื่องหมายว่าเสร็จ
+         * Doc No = คอลัมน์ A + "-" + Discipline + "-" + ค่าในช่อง
+    [EN] Same rules as the bodies of extractLegacyDwrLinks / extractLegacyDrqLinks:
+         * rows whose Date (column B) is empty are skipped
+         * every non-empty cell from column E up to (not including) end_col is one item; Discipline = the header without (P)/(C), and a (C) means completed
+         * key = Date_Discipline_cellValue; a repeated key does not create a new item, but if it is a (C) it overwrites the PDF link (when present) and marks it completed
+         * Doc No = column A + "-" + Discipline + "-" + cell value
+    data_rows: (행 번호, 셀 목록) 의 반복 가능 객체 / [TH] iterable ของ (เลขแถว, รายการเซลล์) / [EN] iterable of (row number, list of cells)
+    """
+    headers = [sheet_cell_text(c) for c in header_cells]
+    stats = ExtractStats()
+    queue: dict[str, LegacyItem] = {}
+    empty: dict = {}
+    for _row_no, cells in data_rows:
+        stats.rows += 1
+        date_cell = cells[LEGACY_DATE_COL] if len(cells) > LEGACY_DATE_COL else empty
+        date_text = sheet_cell_text(date_cell)
+        if not date_text:
+            continue
+        stats.dated_rows += 1
+        folder_url = sheet_cell_link(date_cell)
+        base_no = sheet_cell_text(cells[LEGACY_NO_COL]) if len(cells) > LEGACY_NO_COL else ""
+        for j in range(LEGACY_FIRST_COL, min(len(cells), end_col)):
+            text = sheet_cell_text(cells[j])
+            if not text:
+                continue
+            pdf_url = sheet_cell_link(cells[j])
+            header = headers[j] if j < len(headers) else ""
+            completed = "(C)" in header
+            discipline = header.replace("(P)", "").replace("(C)", "").strip()
+            if not discipline:
+                stats.no_discipline += 1
+                continue
+            key = f"{date_text}_{discipline}_{text}"
+            item = queue.get(key)
+            if item is None:
+                queue[key] = LegacyItem(f"{base_no}-{discipline}-{text}", date_text, discipline, pdf_url, folder_url, completed)
+            else:
+                stats.merged += 1
+                if completed:
+                    if pdf_url:
+                        item.pdf_url = pdf_url
+                    item.completed = True
+    items = list(queue.values())
+    stats.no_link = sum(1 for it in items if not it.pdf_url)
+    return items, stats
+
+
+def list_tabs(sess: Any, sid: str) -> dict[str, tuple[int, int]]:
+    """
+    탭 이름 -> (sheetId, 행 수)
+    [TH] ชื่อแท็บ -> (sheetId, จำนวนแถว)
+    [EN] Tab name -> (sheetId, row count)
+    """
+    data = _sheets_call(sess, "GET", f"{SHEETS_BASE}/{sid}",
+                        params={"fields": "sheets(properties(sheetId,title,gridProperties(rowCount)))"})
+    tabs: dict[str, tuple[int, int]] = {}
+    for sh in data.get("sheets", []):
+        p = sh.get("properties") or {}
+        tabs[str(p.get("title", ""))] = (int(p.get("sheetId", 0)), int((p.get("gridProperties") or {}).get("rowCount", 0)))
+    return tabs
+
+
+def read_legacy_rows(sess: Any, sid: str, tab: str, end_col: int, row_count: int) -> list[tuple[int, list]]:
+    """
+    옛 시트의 3행(헤더)부터 끝까지 셀(값/링크/서식)을 읽어 (행 번호, 셀 목록) 으로 반환. 큰 시트를 위해 여러 번에 나눠 읽음
+    [TH] อ่านเซลล์ (ค่า/ลิงก์/รูปแบบ) ของชีตเก่าตั้งแต่แถว 3 (หัวตาราง) จนจบ คืนเป็น (เลขแถว, รายการเซลล์) แบ่งอ่านหลายรอบสำหรับชีตใหญ่
+    [EN] Reads the legacy sheet's cells (value/link/format) from row 3 (the header) to the end and returns (row number, list of cells);
+         read in several requests so a big sheet is fine
+    """
+    last_col = _col_letter(end_col)
+    quoted = tab.replace("'", "''")
+    rows: list[tuple[int, list]] = []
+    first = LEGACY_HEADER_ROW
+    while first <= row_count:
+        last = min(first + EXTRACT_ROWS_PER_READ - 1, row_count)
+        data = _sheets_call(sess, "GET", f"{SHEETS_BASE}/{sid}", params={
+            "ranges": f"'{quoted}'!A{first}:{last_col}{last}", "includeGridData": "true", "fields": _GRID_FIELDS})
+        for sheet in (data.get("sheets") or [])[:1]:
+            for block in (sheet.get("data") or [])[:1]:
+                start = int(block.get("startRow", 0))
+                for k, row in enumerate(block.get("rowData") or []):
+                    rows.append((start + k + 1, row.get("values") or []))
+        first = last + 1
+    return rows
+
+
+def queue_progress(values: list[list[str]]) -> dict[str, int]:
+    """
+    큐에서 이미 처리된 행의 수 (Waiting / 빈 상태는 제외). 큐를 다시 만들면 이 상태들이 사라짐
+    [TH] จำนวนแถวในคิวที่ถูกประมวลผลไปแล้ว (ไม่นับ Waiting / ว่าง) ถ้าสร้างคิวใหม่สถานะเหล่านี้จะหายไป
+    [EN] Number of queue rows that were already processed (Waiting / blank are not counted). Rebuilding the queue wipes these statuses
+    """
+    counts = {"done": 0, "error": 0, "other": 0}
+    for row in values[1:]:
+        status = str(row[6]).strip() if len(row) > 6 else ""
+        if status in ("", "Waiting"):
+            continue
+        if status == "Done":
+            counts["done"] += 1
+        elif status.startswith("Error"):
+            counts["error"] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
+@dataclass
+class ExtractSummary:
+    items: int = 0
+    completed: int = 0
+    stats: ExtractStats = field(default_factory=ExtractStats)
+    written: int = 0
+    created_tab: bool = False
+    refused: str = ""
+
+
+def write_queue(sess: Any, sid: str, tab: str, rows: list[list]) -> None:
+    """
+    큐 시트를 비우고 헤더 + 행을 기록 (RAW: 날짜/숫자처럼 보이는 문자열이 변환되지 않음). 행은 append 로 넣어 시트가 자동 확장됨
+    [TH] ล้างชีตคิวแล้วเขียนหัวตาราง + แถว (RAW: ข้อความที่หน้าตาเหมือนวันที่/ตัวเลขจะไม่ถูกแปลง) แถวเพิ่มด้วย append ชีตจึงขยายให้เอง
+    [EN] Clears the queue sheet and writes the header + rows (RAW: text that looks like a date/number is not converted).
+         Rows go in with append, so the sheet grows by itself
+    """
+    quoted = tab.replace("'", "''")
+    _sheets_call(sess, "POST", _values_url(sid, f"'{quoted}'") + ":clear", json={})
+    _sheets_call(sess, "PUT", _values_url(sid, f"'{quoted}'!A1:G1"), params={"valueInputOption": "RAW"},
+                 json={"majorDimension": "ROWS", "values": [QUEUE_HEADER]})
+    for i in range(0, len(rows), EXTRACT_ROWS_PER_WRITE):
+        append_rows(sess, sid, tab, rows[i:i + EXTRACT_ROWS_PER_WRITE], value_input="RAW")
+
+
+def extract_queue(args: argparse.Namespace, clients: Clients, key: str, log: Callable[[str], None] = print) -> ExtractSummary:
+    spec = SPECS[key]
+    sess, sid = clients.sheets, args.spreadsheet_id
+    legacy_tab = args.legacy_tabs[key]
+    summary = ExtractSummary()
+
+    tabs = list_tabs(sess, sid)
+    if legacy_tab not in tabs:
+        raise SheetsError(f"tab '{legacy_tab}' not found in the spreadsheet (tabs found: {', '.join(tabs) or '-'}) - check {spec.legacy_env}")
+    rows = read_legacy_rows(sess, sid, legacy_tab, spec.legacy_end_col, tabs[legacy_tab][1])
+    header_cells = next((cells for n, cells in rows if n == LEGACY_HEADER_ROW), [])
+    data_rows = [(n, cells) for n, cells in rows if n >= LEGACY_FIRST_DATA_ROW]
+    items, stats = build_queue_items(header_cells, data_rows, spec.legacy_end_col)
+    summary.items, summary.stats = len(items), stats
+    summary.completed = sum(1 for it in items if it.completed)
+
+    log(f"[{spec.name}] Read tab '{legacy_tab}': {stats.rows} data rows, {stats.dated_rows} with a Date -> "
+        f"{len(items)} unique items (C={summary.completed}, P={len(items) - summary.completed}), {stats.merged} duplicate cells merged")
+    if stats.no_link:
+        log(f"  ⚠ {stats.no_link} items have no PDF link (they will get 'Error: No URL' when migrated)")
+    if stats.no_discipline:
+        log(f"  ⚠ skipped {stats.no_discipline} cells whose column header is empty (column E onwards)")
+    if not items:
+        why = " (row 3, the header row, is empty?)" if not any(sheet_cell_text(c) for c in header_cells) else ""
+        log(f"  No items found -> the {spec.queue_tab} queue is left untouched{why}")
+        return summary
+
+    exists = spec.queue_tab in tabs
+    if exists:
+        progress = queue_progress(read_values(sess, sid, f"'{spec.queue_tab.replace(chr(39), chr(39) * 2)}'!A:G"))
+        if any(progress.values()):
+            parts = [f"Done {progress['done']}", f"Error {progress['error']}"] + ([f"other {progress['other']}"] if progress["other"] else [])
+            summary.refused = ", ".join(parts)
+            if not args.overwrite:
+                log(f"  ✗ The {spec.queue_tab} queue already has processed rows ({summary.refused}) - rebuilding it would wipe every status and set all rows to Waiting\n"
+                    f"    Nothing was written. Add --overwrite if you really want that (back up column G first; "
+                    f"rows whose PDF is already in the DB are marked Done again without calling the AI on the next run)")
+                return summary
+            summary.refused = ""
+            log(f"  ⚠ --overwrite: the existing statuses ({', '.join(parts)}) will be wiped")
+
+    if args.dry_run:
+        for it in items[:5]:
+            log(f"  sample: {it.doc_no} | {it.date} | {it.discipline} | {'C' if it.completed else 'P'} | PDF link: {'yes' if it.pdf_url else 'no'}")
+        log(f"  (--dry-run) nothing was written: would write {len(items)} rows to {spec.queue_tab}" + ("" if exists else " (new tab)"))
+        return summary
+
+    if not exists:
+        _sheets_call(sess, "POST", f"{SHEETS_BASE}/{sid}:batchUpdate",
+                     json={"requests": [{"addSheet": {"properties": {"title": spec.queue_tab}}}]})
+        summary.created_tab = True
+    write_queue(sess, sid, spec.queue_tab, [it.to_row() for it in items])
+    summary.written = len(items)
+    log(f"  ✓ Wrote queue {spec.queue_tab}: {len(items)} rows (Waiting)" + (" - new tab created" if summary.created_tab else ""))
+    return summary
+
+
+def require_legacy_sheet_names(keys: list[str], environ: Optional[dict] = None) -> dict[str, str]:
+    """
+    --extract 에 필요한 옛 시트 탭 이름을 환경 변수에서만 읽음. 비어 있으면 안내 메시지와 함께 종료
+    [TH] อ่านชื่อแท็บชีตเก่าที่ --extract ต้องใช้จากตัวแปรสภาพแวดล้อมเท่านั้น ถ้าว่างจะจบพร้อมข้อความแนะนำ
+    [EN] Reads the legacy tab names that --extract needs from the environment only; exits with a how-to message if one is empty
+    """
+    env = environ if environ is not None else os.environ
+    names: dict[str, str] = {}
+    missing: list[str] = []
+    for key in keys:
+        value = str(env.get(SPECS[key].legacy_env, ""))
+        if value.strip():
+            names[key] = value
+        else:
+            missing.append(key)
+    if missing:
+        lines = ["The legacy sheet tab name is not set for --extract (there is no default in the code):"]
+        for key in missing:
+            lines.append(f'  PowerShell:  $env:{SPECS[key].legacy_env} = "<tab name>"   # for the {SPECS[key].name} queue')
+        lines.append("  The tab name must match the one shown in the spreadsheet exactly (brackets and spaces included)")
+        sys.exit("\n".join(lines))
+    return names
+
+
+def run_extract(args: argparse.Namespace, clients: Clients, keys: list[str], log: Callable[[str], None] = print,
+                sheet_title: str = "") -> int:
+    """
+    큐별로 --extract 실행. 종료 코드: 0 = 정상, 2 = 실패했거나 (--overwrite 없이) 기존 상태 때문에 쓰지 않은 큐가 있음
+    [TH] รัน --extract ทีละคิว รหัสออก: 0 = ปกติ, 2 = มีคิวที่ล้มเหลวหรือไม่ได้เขียนเพราะมีสถานะเดิม (ไม่ได้ใส่ --overwrite)
+    [EN] Runs --extract queue by queue. Exit code: 0 = fine, 2 = a queue failed or was not written because of existing statuses (no --overwrite)
+    """
+    multi = len(keys) > 1
+    exit_code = 0
+    for key in keys:
+        spec = SPECS[key]
+        log(("\n" if multi else "") + f"===== Build queue {spec.name}: {args.legacy_tabs[key]} -> {spec.queue_tab}"
+            + (f" | sheet: {sheet_title}" if sheet_title else "") + " =====")
+        try:
+            summary = extract_queue(args, clients, key, log=log)
+        except SheetsError as e:
+            log(f"✗ Could not build queue {spec.queue_tab}: {e}")
+            exit_code = 2
+            continue
+        if summary.refused and not args.dry_run:
+            exit_code = 2
+    return exit_code
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -1180,6 +1562,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="for a PDF over --max-mb write Error: Too Large instead of sending the cover image (the Apps Script always sends the cover image)")
     p.add_argument("--dry-run", action="store_true", help="only list the rows that would be processed (no Drive/Gemini calls, no sheet writes)")
     p.add_argument("--check-access", action="store_true", help="check that the service account can open the PDF files (no Gemini calls, no sheet writes)")
+    p.add_argument("--extract", action="store_true",
+                   help="build the queues from the legacy sheets (replaces extractLegacyDwrLinks / extractLegacyDrqLinks); no Drive/Gemini calls; needs PMIS_LEGACY_DWR_SHEET / PMIS_LEGACY_DRQ_SHEET; works with --dry-run and --queue")
+    p.add_argument("--overwrite", action="store_true",
+                   help="with --extract: allow overwriting a queue that already has Done/Error rows (the Apps Script always did); without it such a queue is left untouched")
     return p
 
 
@@ -1294,14 +1680,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     # [EN] Checked first (a missing setting is reported before any key or network work)
     args.spreadsheet_id = require_spreadsheet_id()
     keys = queues_to_run(args.queue)
+    if args.extract:
+        if args.only_rows or args.check_access:
+            sys.exit("--extract cannot be combined with --only-rows or --check-access")
+        args.legacy_tabs = require_legacy_sheet_names(keys)
+    elif args.overwrite:
+        sys.exit("--overwrite only works together with --extract")
     if args.only_rows and len(keys) > 1:
         sys.exit("--only-rows works with one queue: add --queue dwr or --queue drq (row numbers belong to that queue sheet)")
-    clients = make_clients(args, need_gemini=not (args.dry_run or args.check_access))
+    clients = make_clients(args, need_gemini=not (args.dry_run or args.check_access or args.extract))
     title, title_error = spreadsheet_title(clients.sheets, args.spreadsheet_id)
     if title:
         sheet_label = f"{title} ({args.spreadsheet_id})"
     else:
         sheet_label = f"{args.spreadsheet_id} (could not read the sheet name - check the ID and that the sheet is shared with the service account: {title_error})"
+    if args.extract:
+        print(f"service account: {clients.sa_email} | sheet: {sheet_label} | mode: build the queues from the legacy sheets (--extract)")
+        return run_extract(args, clients, keys, sheet_title=title)
     print(f"service account: {clients.sa_email} | sheet: {sheet_label} | model: {clients.model}")
     return run_queues(args, clients, keys, sheet_title=title)
 
