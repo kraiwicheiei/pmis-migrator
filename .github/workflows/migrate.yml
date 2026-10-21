@@ -142,7 +142,7 @@ jobs:
           # Actions logs are readable by anyone when the repository is public, so the full output (file IDs, sheet name,
           # row errors that quote text from the PDFs) only goes to a temporary file on the runner. The log shows the
           # counts only; the per-row details are in column G of the queue sheet.
-          safe_lines='^(คิว |พบแถวที่ต้องทำ|เสร็จ:|รวมทุกคิว|ในจำนวน Done|หยุดก่อนครบ|Gemini [0-9]+ ครั้ง|✗ ทำคิว|\[MIGRATION_QUEUE(_DRQ)?\] เข้าถึงได้|\(dry-run)'
+          safe_lines='^(Queue |Rows to process|Finished:|All queues|Of the Done rows|Stopped early|Gemini calls:|✗ Could not process queue|\[MIGRATION_QUEUE(_DRQ)?\] Reachable|\(dry-run)'
           echo "Running: python migrate_queue.py ${args[*]}"
           status=0
           python migrate_queue.py "${args[@]}" > "$RUNNER_TEMP/run.log" 2>&1 || status=$?

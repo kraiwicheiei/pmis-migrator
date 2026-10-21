@@ -324,7 +324,7 @@ def test_large_pdf_sent_as_cover_thumbnail_like_apps_script():
     # [TH] ไม่ดาวน์โหลด PDF ต้นฉบับ ใช้แค่ thumbnail และส่งด้วย MIME ของภาพ
     # [EN] The original PDF is not downloaded; only the thumbnail is, and it is sent with an image MIME type
     assert w.downloads == [] and w.thumbnail_calls == [FID(1)] and w.gemini_mimes == ["image/png"]
-    assert any("แถว 2" in m and "หน้าแรกเท่านั้น" in m for m in logs)
+    assert any("row 2" in m and "first page only" in m for m in logs)
 
 
 def test_pdf_exactly_at_limit_is_downloaded_in_full():
@@ -366,9 +366,9 @@ def test_check_access_reports_rows_that_will_use_the_cover():
     logs = []
     mq.run(ns(check_access=True), w.clients(), log=logs.append)
     assert w.gemini_calls == 0 and w.downloads == [] and w.thumbnail_calls == []
-    info = [m for m in logs if "ภาพหน้าปก" in m]
-    assert len(info) == 1 and "แถว 3" in info[0] and "[MIGRATION_QUEUE]" in info[0]
-    assert any("เข้าถึงได้ 2/2" in m for m in logs)
+    info = [m for m in logs if "cover image" in m]
+    assert len(info) == 1 and "row 3" in info[0] and "[MIGRATION_QUEUE]" in info[0]
+    assert any("Reachable: 2/2" in m for m in logs)
 
 
 def test_no_url_row():
@@ -385,8 +385,8 @@ def test_dry_run_and_check_access_do_not_write():
     assert w.gemini_calls == 0 and not w.batch_updates and not w.appends
     mq.run(ns(check_access=True), w.clients(), log=logs.append)
     assert w.gemini_calls == 0 and not w.batch_updates and not w.appends
-    assert any("แถว 4" in m and "Drive Access" in m for m in logs)
-    assert any("เข้าถึงได้ 2/3" in m for m in logs)
+    assert any("row 4" in m and "Drive Access" in m for m in logs)
+    assert any("Reachable: 2/3" in m for m in logs)
 
 
 # --check-access 의 모든 출력 줄에 큐 시트 이름이 표시되고, 다른 큐 안내가 나온다
@@ -402,9 +402,9 @@ def test_check_access_names_the_queue_sheet(queue, tab, other_tab, other_key):
     logs = []
     mq.run(ns(queue=queue, check_access=True), w.clients(), log=logs.append)
     tagged = [m for m in logs if m.startswith(f"[{tab}]") or f"✗ [{tab}]" in m]
-    assert any("ตรวจสิทธิ์" in m and f"--queue {queue}" in m for m in tagged)
-    assert any("แถว 4" in m and "Drive Access" in m for m in tagged)
-    assert any("เข้าถึงได้ 2/3" in m for m in tagged)
+    assert any("Checking Drive access" in m and f"--queue {queue}" in m for m in tagged)
+    assert any("row 4" in m and "Drive Access" in m for m in tagged)
+    assert any("Reachable: 2/3" in m for m in tagged)
     # 다른 큐 시트 이름은 "다른 큐 안내" 줄에만 나타나야 한다 / the other sheet is named only in the hint line
     hint = [m for m in logs if f"--queue {other_key}" in m]
     assert len(hint) == 1 and other_tab in hint[0] and "--check-access" in hint[0]
@@ -465,28 +465,28 @@ def test_main_without_queue_runs_dwr_then_drq(monkeypatch, capsys):
     assert main_with(monkeypatch, ["--limit", "7"], rec) == 0
     assert rec.calls == [("dwr", False, 7), ("drq", False, 7)]   # --limit 은 큐마다 적용
     out = capsys.readouterr().out
-    assert out.index("MIGRATION_QUEUE ->") < out.index("MIGRATION_QUEUE_DRQ ->") and "รวมทุกคิว: Done=2, Error=0" in out
+    assert out.index("MIGRATION_QUEUE ->") < out.index("MIGRATION_QUEUE_DRQ ->") and "All queues: Done=2, Error=0" in out
 
 
 def test_main_with_queue_runs_only_that_queue(monkeypatch, capsys):
     rec = RunRecorder()
     assert main_with(monkeypatch, ["--queue", "drq"], rec) == 0
     assert rec.calls == [("drq", True, 30)]
-    assert "รวมทุกคิว" not in capsys.readouterr().out
+    assert "All queues" not in capsys.readouterr().out
 
 
 def test_main_stops_before_second_queue_when_first_stops(monkeypatch, capsys):
-    rec = RunRecorder({"dwr": mq.Summary(done=1, stopped_reason="Gemini ตอบ API 402")})
+    rec = RunRecorder({"dwr": mq.Summary(done=1, stopped_reason="Gemini answered API 402")})
     assert main_with(monkeypatch, [], rec) == 2
     assert [c[0] for c in rec.calls] == ["dwr"]
-    assert "ข้ามคิวที่เหลือ: MIGRATION_QUEUE_DRQ" in capsys.readouterr().out
+    assert "skipping the remaining queues: MIGRATION_QUEUE_DRQ" in capsys.readouterr().out
 
 
 def test_main_continues_with_other_queue_when_one_cannot_be_read(monkeypatch, capsys):
     rec = RunRecorder({"dwr": mq.SheetsError("HTTP 400: Unable to parse range")})
     assert main_with(monkeypatch, [], rec) == 2
     assert [c[0] for c in rec.calls] == ["dwr", "drq"]
-    assert "ทำคิว MIGRATION_QUEUE ไม่ได้" in capsys.readouterr().out
+    assert "Could not process queue MIGRATION_QUEUE" in capsys.readouterr().out
 
 
 def test_only_rows_requires_a_single_queue(monkeypatch):
@@ -519,28 +519,28 @@ def run_logs(w, **over):
 def test_zero_rows_in_empty_queue_points_to_the_spreadsheet_id():
     w = FakeWorld([])
     logs = run_logs(w)
-    assert any("ว่าง (มีแต่หัวตาราง" in m for m in logs)
-    assert any("ไม่มีแถวข้อมูล" in m and "คนละสเปรดชีต" in m for m in logs) and any("ID: SID" in m for m in logs)
+    assert any("empty (header only" in m for m in logs)
+    assert any("has no data rows" in m and "different spreadsheet" in m for m in logs) and any("ID: SID" in m for m in logs)
     assert w.gemini_calls == 0
 
 
 def test_zero_rows_when_everything_is_done_lists_the_statuses():
     w = world(["Done", "Done", "Done"])
     logs = run_logs(w)
-    assert any("พบแถวที่ต้องทำ 0 แถว" in m for m in logs)
-    assert any("'Done'×3" in m and "'Waiting'" in m for m in logs) and any("ทุกแถวเป็น Done" in m for m in logs)
+    assert any("Rows to process: 0" in m for m in logs)
+    assert any("'Done'×3" in m and "'Waiting'" in m for m in logs) and any("Every row is already Done" in m for m in logs)
 
 
 def test_zero_rows_with_unexpected_status_text_shows_it_exactly():
     w = world(["waiting", "Pending", "Pending"])
     logs = run_logs(w)
-    assert any("'Pending'×2" in m and "'waiting'×1" in m and "ตัวพิมพ์ต้องตรง" in m for m in logs)
+    assert any("'Pending'×2" in m and "'waiting'×1" in m and "case-sensitive" in m for m in logs)
 
 
 def test_zero_rows_with_blank_status_suggests_include_blank():
     w = world(["", ""])
     logs = run_logs(w)
-    assert any("2 แถวที่คอลัมน์ G ว่างแต่มี URL" in m and "--include-blank" in m for m in logs)
+    assert any("2 rows have a blank column G but a URL" in m and "--include-blank" in m for m in logs)
     assert w.gemini_calls == 0
     # --include-blank 을 주면 그 행들이 처리됨 / [TH] ใส่ --include-blank แล้วแถวเหล่านั้นถูกทำ / [EN] with --include-blank those rows are processed
     assert mq.run(ns(include_blank=True), w.clients(), log=lambda m: None).done == 2
@@ -549,13 +549,13 @@ def test_zero_rows_with_blank_status_suggests_include_blank():
 def test_zero_rows_warns_when_column_g_header_is_not_ai_processed():
     w = world(["Done"])
     w.queue[0][6] = "Status"
-    assert any("หัวคอลัมน์ G คือ 'Status'" in m for m in run_logs(w))
+    assert any("The column G header is 'Status'" in m for m in run_logs(w))
 
 
 def test_no_explanation_when_there_are_rows_to_process():
     w = world(["Waiting"])
     logs = run_logs(w)
-    assert not any("สคริปต์ทำเฉพาะแถวที่คอลัมน์ G" in m or "ไม่มีแถวข้อมูล" in m for m in logs)
+    assert not any("The script processes only rows whose column G" in m or "has no data rows" in m for m in logs)
 
 
 def test_spreadsheet_title_and_failure_fallback():
@@ -587,14 +587,14 @@ def test_main_prints_the_sheet_title_first(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "sheet: Example Spreadsheet (ABC)" in out
     # 큐 제목 줄에도 시트 이름이 나옴 / [TH] หัวของคิวก็มีชื่อชีต / [EN] the queue heading also carries the sheet name
-    assert "===== คิว DWR: MIGRATION_QUEUE -> DB_DWR | ชีต: Example Spreadsheet =====" in out
+    assert "===== Queue DWR: MIGRATION_QUEUE -> DB_DWR | sheet: Example Spreadsheet =====" in out
     main_with(monkeypatch, [], rec, sid="ABC")
     out = capsys.readouterr().out
-    assert "===== คิว DRQ: MIGRATION_QUEUE_DRQ -> DB_DRQ | ชีต: Example Spreadsheet =====" in out
+    assert "===== Queue DRQ: MIGRATION_QUEUE_DRQ -> DB_DRQ | sheet: Example Spreadsheet =====" in out
     monkeypatch.setattr(mq, "spreadsheet_title", lambda sess, sid: ("", "HTTP 403: The caller does not have permission"))
     main_with(monkeypatch, ["--queue", "dwr"], rec, sid="ABC")
     out = capsys.readouterr().out
-    assert "อ่านชื่อชีตไม่ได้" in out and "HTTP 403" in out and "| ชีต:" not in out
+    assert "could not read the sheet name" in out and "HTTP 403" in out and "===== Queue DWR: MIGRATION_QUEUE -> DB_DWR =====\n" in out
 
 
 # ---------------------------------------------------------------------------
@@ -654,7 +654,7 @@ def test_parse_retries_recovers_when_second_answer_is_valid():
     s = mq.run(ns(workers=1, parse_retries=1), w.clients(), log=logs.append)
     assert (s.done, s.errors) == (1, {}) and w.gemini_calls == 2
     assert w.queue[1][6] == "Done" and len(w.db) == 2
-    assert any("ลองเรียกใหม่ 1 ครั้ง" in m for m in logs)
+    assert any("after retrying 1x" in m for m in logs)
 
 
 def test_parse_retries_gives_up_and_reports_count():
@@ -714,13 +714,13 @@ def test_pick_report_rules():
     # 같은 보고서 중복 -> 첫 번째
     # [TH] รายงานเดียวกันซ้ำ -> ตัวแรก  [EN] Identical duplicates -> the first one
     d, note = pick([a, dict(a)], doc_no="")
-    assert d == a and "ซ้ำ 2" in note
+    assert d == a and "same report 2 times" in note
     # Doc No 로 선택 (순서/0 채움/대소문자 무관)
     # [TH] เลือกด้วย Doc No (ไม่สนลำดับ/เลข 0 นำหน้า/ตัวพิมพ์)  [EN] Choose by Doc No (order, zero padding and case do not matter)
     d, note = pick([b, a])
-    assert d == a and "2 รายงาน" in note and "ตรงกับ Doc No" in note
+    assert d == a and "2 reports" in note and "matches Doc No" in note
     d, note = pick([a, rep_json("acme-dwr-civ-231", Activities="other page")])
-    assert d == a and "มี 2 รายการที่ตรง" in note
+    assert d == a and "2 reports match" in note
     # 선택 불가
     # [TH] เลือกไม่ได้  [EN] Cannot choose
     with pytest.raises(mq.MultiReportError) as ei:
@@ -750,8 +750,8 @@ def test_multi_report_picks_matching_doc_no_and_flags_row():
     assert w.queue[1][6] == "Done" and len(w.db) == 2
     row = w.db[1]
     assert row[1] == "ACME-DWR-CIV-0231" and row[12] == "RIGHT"
-    assert any("⚠ แถว 2" in m and "Doc No" in m for m in logs)
-    assert any("1 แถวที่ AI ตอบหลายรายงาน" in m for m in logs)
+    assert any("⚠ row 2" in m and "Doc No" in m for m in logs)
+    assert any("1 had several reports" in m for m in logs)
 
 
 def test_multi_report_no_match_retries_with_single_report_hint():

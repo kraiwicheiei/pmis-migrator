@@ -333,15 +333,15 @@ def pick_report(obj: Any, doc_no: str = "", no_key: str = "", accept_first: bool
         return items[0], ""
     n = len(obj)
     if all(x == items[0] for x in items):
-        return items[0], f"AI ตอบรายงานเดียวกันซ้ำ {n} รายการ ใช้รายการแรก"
+        return items[0], f"AI returned the same report {n} times; used the first one"
     want = norm_doc_no(doc_no)
     if want and no_key:
         hits = [x for x in items if norm_doc_no(x.get(no_key)) == want]
         if hits:
-            extra = f" (มี {len(hits)} รายการที่ตรง ใช้รายการแรก)" if len(hits) > 1 else ""
-            return hits[0], f"AI ตอบ {n} รายงานใน PDF เดียว เลือกรายการที่ {no_key} ตรงกับ Doc No '{doc_no}'{extra}"
+            extra = f" ({len(hits)} reports match; used the first one)" if len(hits) > 1 else ""
+            return hits[0], f"AI returned {n} reports for one PDF; picked the one whose {no_key} matches Doc No '{doc_no}'{extra}"
     if accept_first:
-        return items[0], f"AI ตอบ {n} รายงานใน PDF เดียวและไม่มีรายการที่ตรงกับ Doc No '{doc_no}' ใช้รายการแรกตาม --accept-first-report"
+        return items[0], f"AI returned {n} reports for one PDF and none matches Doc No '{doc_no}'; used the first one (--accept-first-report)"
     raise MultiReportError(
         f"AI returned {n} reports in one answer and none has {no_key or 'a number'} matching the queue Doc No '{doc_no}': "
         f"{describe_reports(obj, no_key)}")
@@ -507,7 +507,7 @@ class RunControl:
             self.consecutive_rate_limited += 1
             hit = self.consecutive_rate_limited >= limit
         if hit:
-            self.request_stop(f"Gemini ตอบ 429 ต่อเนื่อง {limit} แถวแม้ retry แล้ว (rate limit / โควตารายวัน) - หยุดเพื่อไม่ให้ทุกแถวกลายเป็น Error")
+            self.request_stop(f"Gemini answered 429 for {limit} rows in a row even after retries (rate limit / daily quota) - stopping so that not every row becomes an Error")
 
     def note_success(self) -> None:
         with self._lock:
@@ -699,9 +699,9 @@ def drive_thumbnail(sess: Any, file_id: str) -> tuple[bytes, str]:
     return resp.content, ctype
 
 
-# 시트의 오류 셀(G열)에 기록되는 모든 문구는 영어로 통일 (콘솔 로그만 태국어)
-# [TH] ข้อความทุกอย่างที่เขียนลงเซลล์ Error (คอลัมน์ G) เป็นภาษาอังกฤษ (มีแต่ log บนคอนโซลที่เป็นภาษาไทย)
-# [EN] Every phrase written into the sheet's Error cell (column G) is in English (only the console log is in Thai)
+# 시트의 오류 셀(G열)에 기록되는 모든 문구와 콘솔 로그는 영어
+# [TH] ข้อความทุกอย่างที่เขียนลงเซลล์ Error (คอลัมน์ G) และ log บนคอนโซลเป็นภาษาอังกฤษ
+# [EN] Every phrase written into the sheet's Error cell (column G), and the console log, is in English
 DRIVE_HINT = "the file does not exist / was deleted, or the file (or its folder) is not shared with the service account"
 
 
@@ -871,7 +871,7 @@ def process_job(job: Job, spec: QueueSpec, clients: Clients, tls: threading.loca
     while True:
         outcome = call_gemini(clients, prompt, pdf_bytes, mime, usage, ctl)
         if outcome.kind == "fatal":
-            ctl.request_stop(f"Gemini ตอบ {outcome.label}: {outcome.detail[:300]}")
+            ctl.request_stop(f"Gemini answered {outcome.label}: {outcome.detail[:300]}")
             return RowResult(job, "error", label=outcome.label, detail=outcome.detail)
         if outcome.kind == "error":
             if outcome.label == "Stopped":
@@ -931,15 +931,15 @@ def explain_no_jobs(values: list[list[str]], sid: str, spec: QueueSpec, *, retry
     lines: list[str] = []
     data = values[1:] if values else []
     if not data:
-        lines.append(f"แท็บ {spec.queue_tab} ไม่มีแถวข้อมูล - ถ้าในชีตที่คุณเปิดอยู่มีข้อมูล แปลว่าสคริปต์อ่านคนละสเปรดชีต")
-        lines.append(f"ตรวจ ID: {sid} (ดูบรรทัด 'sheet:' ด้านบน; ID มาจากตัวแปร PMIS_SPREADSHEET_ID)")
+        lines.append(f"Tab {spec.queue_tab} has no data rows - if the sheet you have open does, the script is reading a different spreadsheet")
+        lines.append(f"Check the ID: {sid} (see the 'sheet:' line above; the ID comes from the PMIS_SPREADSHEET_ID variable)")
         return lines
     if only_rows is not None:
-        lines.append("ใช้ --only-rows: ทำเฉพาะแถวที่ระบุ และข้ามแถวที่เป็น Done - ตรวจเลขแถวอีกครั้ง")
+        lines.append("--only-rows is set: only those rows are processed and Done rows are skipped - check the row numbers")
         return lines
     header_g = (values[0][6].strip() if len(values[0]) > 6 else "")
     if header_g != "AI Processed":
-        lines.append(f"หัวคอลัมน์ G คือ {header_g!r} (ปกติคือ 'AI Processed') - สคริปต์อ่านสถานะจากคอลัมน์ G เสมอ ตรวจว่าคอลัมน์สถานะอยู่ที่ G")
+        lines.append(f"The column G header is {header_g!r} (normally 'AI Processed') - the script always reads the status from column G; check that the status column is G")
     counts: dict[str, int] = {}
     blank_with_url = 0
     for row in data:
@@ -951,12 +951,12 @@ def explain_no_jobs(values: list[list[str]], sid: str, spec: QueueSpec, *, retry
     shown = ", ".join(f"{k!r}×{v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1])[:8])
     if len(counts) > 8:
         shown += ", …"
-    wanted = "'Waiting' หรือขึ้นต้นด้วย 'Error'" if retry_errors else "'Waiting'"
-    lines.append(f"สคริปต์ทำเฉพาะแถวที่คอลัมน์ G เป็น {wanted} (ตัวพิมพ์ต้องตรง) แต่ในคิวนี้พบ: {shown}")
+    wanted = "'Waiting' or starting with 'Error'" if retry_errors else "'Waiting'"
+    lines.append(f"The script processes only rows whose column G is {wanted} (case-sensitive), but this queue has: {shown}")
     if blank_with_url and not include_blank:
-        lines.append(f"มี {blank_with_url} แถวที่คอลัมน์ G ว่างแต่มี URL - ใส่ --include-blank ถ้าต้องการให้ทำแถวพวกนี้ด้วย")
+        lines.append(f"{blank_with_url} rows have a blank column G but a URL - add --include-blank to process them too")
     if set(counts) <= {"Done"}:
-        lines.append("ทุกแถวเป็น Done แล้ว - ถ้ายังมีงานค้าง ให้สร้างคิวใหม่ (extractLegacy…Links) หรือแก้สถานะเป็น Waiting")
+        lines.append("Every row is already Done - if work is still pending, rebuild the queue (extractLegacy…Links) or set the status back to Waiting")
     return lines
 
 
@@ -980,10 +980,10 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
         key = "Error" if s.startswith("Error") else s
         by_status[key] = by_status.get(key, 0) + 1
     if by_status:
-        log(f"คิว {spec.queue_tab}: " + ", ".join(f"{k}={v}" for k, v in sorted(by_status.items())))
+        log(f"Queue {spec.queue_tab}: " + ", ".join(f"{k}={v}" for k, v in sorted(by_status.items())))
     else:
-        log(f"คิว {spec.queue_tab}: ว่าง (มีแต่หัวตาราง ไม่มีแถวข้อมูล)")
-    log(f"พบแถวที่ต้องทำ {len(jobs)} แถว" + (f" (จำกัดรอบนี้ {args.limit})" if args.limit and len(jobs) > args.limit else ""))
+        log(f"Queue {spec.queue_tab}: empty (header only, no data rows)")
+    log(f"Rows to process: {len(jobs)}" + (f" (this run is limited to {args.limit})" if args.limit and len(jobs) > args.limit else ""))
     if not jobs:
         for line in explain_no_jobs(values, sid, spec, retry_errors=not args.no_retry_errors, include_blank=args.include_blank,
                                     only_rows=only_rows):
@@ -996,10 +996,10 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
     # [EN] --dry-run: only list the rows that would be processed (no Drive/Gemini calls, no sheet writes)
     if args.dry_run:
         for j in jobs[:50]:
-            log(f"  แถว {j.row}: fileId={extract_file_id(j.pdf_url)} | สถานะเดิม={j.prior_status[:60]!r}")
+            log(f"  row {j.row}: fileId={extract_file_id(j.pdf_url)} | previous status={j.prior_status[:60]!r}")
         if len(jobs) > 50:
-            log(f"  ... และอีก {len(jobs) - 50} แถว")
-        log("(dry-run: ไม่เรียก Drive/Gemini และไม่เขียนชีต)")
+            log(f"  ... and {len(jobs) - 50} more rows")
+        log("(dry-run: no Drive/Gemini calls, no sheet writes)")
         return summary
 
     tls = threading.local()
@@ -1012,22 +1012,22 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
         # [TH] ทุกบรรทัดของผลลัพธ์ระบุชื่อชีตคิว (MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ) ว่าผลมาจากชีตไหน
         # [EN] Every output line names the queue sheet (MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ) the result belongs to
         tag = f"[{spec.queue_tab}]"
-        log(f"{tag} ตรวจสิทธิ์เข้าถึงไฟล์ PDF ใน Drive ของคิว {spec.name} (--queue {args.queue}; ไม่เรียก Gemini ไม่เขียนชีต) ...")
+        log(f"{tag} Checking Drive access to the PDF files of the {spec.name} queue (--queue {args.queue}; no Gemini calls, no sheet writes) ...")
         bad = 0
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             for res in pool.map(lambda j: process_job(j, spec, clients, tls, usage, ctl, args.max_mb * 1_000_000, True, allow_thumbnail), jobs):
                 if res.kind == "error":
                     bad += 1
-                    log(f"  ✗ {tag} แถว {res.job.row}: {res.label} | {res.detail[:300]}")
+                    log(f"  ✗ {tag} row {res.job.row}: {res.label} | {res.detail[:300]}")
                 elif (res.data or {}).get("_cover"):
-                    log(f"  ℹ {tag} แถว {res.job.row}: PDF ใหญ่ {(res.data or {}).get('_size', 0) / 1e6:.1f} MB (> {args.max_mb:g} MB) -> จะส่งเฉพาะภาพหน้าปก")
-        log(f"{tag} เข้าถึงได้ {len(jobs) - bad}/{len(jobs)} ไฟล์" + (f" - แชร์ไฟล์/โฟลเดอร์ให้ {clients.sa_email}" if bad and clients.sa_email else ""))
+                    log(f"  ℹ {tag} row {res.job.row}: large PDF {(res.data or {}).get('_size', 0) / 1e6:.1f} MB (> {args.max_mb:g} MB) -> only the cover image will be sent")
+        log(f"{tag} Reachable: {len(jobs) - bad}/{len(jobs)} files" + (f" - share the files/folder with {clients.sa_email}" if bad and clients.sa_email else ""))
         # 다른 큐는 이번 실행에서 확인하지 않았으므로, 해당 큐를 확인하는 명령어를 안내
         # [TH] รอบนี้ไม่ได้ตรวจคิวอีกอัน จึงบอกคำสั่งสำหรับตรวจคิวนั้น
         # [EN] The other queue was not checked in this run, so print the command that checks it
         other_key = next((k for k in sorted(SPECS) if k != args.queue), None)
         if other_key and getattr(args, "hint_other_queue", True):
-            log(f"(รอบนี้ตรวจเฉพาะ {spec.queue_tab}; คิว {SPECS[other_key].queue_tab}: python migrate_queue.py --check-access --queue {other_key} --limit 0)")
+            log(f"(this run checked only {spec.queue_tab}; for {SPECS[other_key].queue_tab}: python migrate_queue.py --check-access --queue {other_key} --limit 0)")
         return summary
 
     # 중복 방지: 이미 DB 에 있는 PDF -> AI 호출 없이 Done 처리
@@ -1051,7 +1051,7 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
     if reconciled_updates:
         write_statuses(clients.sheets, sid, spec.queue_tab, reconciled_updates)
         summary.reconciled = len(reconciled_updates)
-        log(f"พบ {summary.reconciled} แถวที่อยู่ใน {spec.db_tab} แล้ว -> ตั้ง Done โดยไม่เรียก AI (แถว: {sorted(reconciled_updates)[:20]})")
+        log(f"{summary.reconciled} rows are already in {spec.db_tab} -> marked Done without calling the AI (rows: {sorted(reconciled_updates)[:20]})")
 
     max_bytes = args.max_mb * 1_000_000
     interrupted = False
@@ -1067,7 +1067,7 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
                 results.append(fut.result())
         except KeyboardInterrupt:
             interrupted = True
-            ctl.request_stop("ผู้ใช้กด Ctrl+C")
+            ctl.request_stop("stopped by the user (Ctrl+C)")
             # 진행 중인 작업은 끝까지 기다림 (아직 시작 안 한 작업은 건너뜀)
             # [TH] ให้งานที่ค้างอยู่ทำเสร็จ (ตัวที่ยังไม่เริ่มจะถูกข้าม)
             # [EN] Let in-flight jobs finish (jobs that have not started are skipped)
@@ -1085,7 +1085,7 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
             if r.kind == "error":
                 updates[r.job.row] = error_text(r.label, r.detail)
                 summary.errors[r.label] = summary.errors.get(r.label, 0) + 1
-                log(f"  ✗ แถว {r.job.row}: {updates[r.job.row][:200]}")
+                log(f"  ✗ row {r.job.row}: {updates[r.job.row][:200]}")
             elif r.kind == "skipped":
                 summary.skipped += 1
 
@@ -1104,42 +1104,42 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
                 for r in ok:
                     updates[r.job.row] = error_text("DB Write", f"{e} | rows={len(db_rows)}, cols={len(db_rows[0])}")
                 summary.errors["DB Write"] = summary.errors.get("DB Write", 0) + len(ok)
-                log(f"  ✗ เขียน {spec.db_tab} ไม่สำเร็จ: {e}")
-                ctl.request_stop("เขียน DB ไม่สำเร็จ (รันใหม่ได้ - ระบบเช็คข้อมูลซ้ำให้)")
+                log(f"  ✗ writing {spec.db_tab} failed: {e}")
+                ctl.request_stop("DB write failed (safe to re-run - duplicates are checked)")
             else:
                 for r in ok:
                     updates[r.job.row] = "Done"
                     if r.note:
                         summary.cover_only += 1
-                        log(f"  ℹ แถว {r.job.row}: PDF ใหญ่ ({r.note}) - ข้อมูลมาจากหน้าแรกเท่านั้น ควรตรวจสอบ")
+                        log(f"  ℹ row {r.job.row}: large PDF ({r.note}) - the data comes from the first page only, please review")
                     if r.retried:
-                        log(f"  ℹ แถว {r.job.row}: JSON ที่ AI ตอบพังครั้งแรก ลองเรียกใหม่ {r.retried} ครั้งจึงผ่าน")
+                        log(f"  ℹ row {r.job.row}: the AI's JSON was broken at first; it parsed after retrying {r.retried}x")
                     if r.multi:
                         summary.multi_report += 1
-                        log(f"  ⚠ แถว {r.job.row}: {r.multi} - ควรตรวจสอบ")
+                        log(f"  ⚠ row {r.job.row}: {r.multi} - please review")
                 summary.done += len(ok)
-                log(f"  ✓ {len(ok)} แถว -> {spec.db_tab} (แถวคิว {[r.job.row for r in ok][:10]}{'…' if len(ok) > 10 else ''})")
+                log(f"  ✓ {len(ok)} rows -> {spec.db_tab} (queue rows {[r.job.row for r in ok][:10]}{'…' if len(ok) > 10 else ''})")
         try:
             write_statuses(clients.sheets, sid, spec.queue_tab, updates)
         except SheetsError as e:
-            log(f"  !! เขียนสถานะลงคิวไม่สำเร็จ: {e}\n     ข้อมูลอยู่ใน {spec.db_tab} แล้ว - รันซ้ำได้ ระบบจะตั้ง Done ให้โดยไม่เรียก AI")
-            ctl.request_stop("เขียนสถานะลงคิวไม่สำเร็จ")
+            log(f"  !! writing the queue statuses failed: {e}\n     the data is already in {spec.db_tab} - re-run and those rows are marked Done without calling the AI")
+            ctl.request_stop("writing the queue statuses failed")
         if interrupted:
             break
 
     summary.stopped_reason = ctl.stop_reason
     log("-" * 60)
-    log(f"เสร็จ: Done={summary.done} (+reconciled {summary.reconciled}), Error={sum(summary.errors.values())} {summary.errors or ''}, ข้าม={summary.skipped}")
+    log(f"Finished: Done={summary.done} (+reconciled {summary.reconciled}), Error={sum(summary.errors.values())} {summary.errors or ''}, Skipped={summary.skipped}")
     if summary.cover_only:
-        log(f"ในจำนวน Done มี {summary.cover_only} แถวที่ใช้ภาพหน้าปกแทน PDF ใหญ่ (เหมือน Apps Script) - ข้อมูลจากหน้าแรกเท่านั้น")
+        log(f"Of the Done rows, {summary.cover_only} used the cover image instead of a large PDF (like the Apps Script) - data from the first page only")
     if summary.multi_report:
-        log(f"ในจำนวน Done มี {summary.multi_report} แถวที่ AI ตอบหลายรายงานใน PDF เดียวแล้วเลือกมาหนึ่งรายการ - ควรตรวจสอบแถวที่มีเครื่องหมาย ⚠ ด้านบน")
+        log(f"Of the Done rows, {summary.multi_report} had several reports in one PDF and one was picked - review the rows marked ⚠ above")
     if ctl.stop_reason:
-        log(f"หยุดก่อนครบ: {ctl.stop_reason}")
+        log(f"Stopped early: {ctl.stop_reason}")
     if usage.calls:
         pin, pout = PRICES_USD_PER_M.get(clients.model, (None, None))
         cost = f" ≈ ${usage.prompt / 1e6 * pin + usage.output / 1e6 * pout:.3f} (list price)" if pin else ""
-        log(f"Gemini {usage.calls} ครั้ง: input {usage.prompt:,} tok, output(+thinking) {usage.output:,} tok{cost}")
+        log(f"Gemini calls: {usage.calls}, input {usage.prompt:,} tok, output(+thinking) {usage.output:,} tok{cost}")
     return summary
 
 
@@ -1155,31 +1155,31 @@ def _col_letter(n: int) -> str:
 # CLI
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="ประมวลผลคิว MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ ด้วย Gemini (แทน Apps Script)")
+    p = argparse.ArgumentParser(description="Process the MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ queues with Gemini (replaces the Apps Script)")
     p.add_argument("--queue", choices=sorted(SPECS), default=None,
-                   help="dwr = MIGRATION_QUEUE->DB_DWR, drq = MIGRATION_QUEUE_DRQ->DB_DRQ; ไม่ระบุ = ทำทั้งสองคิว (dwr ก่อน แล้วตามด้วย drq)")
-    p.add_argument("--sa-key", default=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"), help="path ของ service account key (.json)")
+                   help="dwr = MIGRATION_QUEUE->DB_DWR, drq = MIGRATION_QUEUE_DRQ->DB_DRQ; omitted = both queues (dwr first, then drq)")
+    p.add_argument("--sa-key", default=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"), help="path to the service account key (.json)")
     p.add_argument("--model", default=os.environ.get("GEMINI_MODEL", DEFAULT_MODEL))
     p.add_argument("--api-version", default=DEFAULT_API_VERSION)
-    p.add_argument("--limit", type=int, default=30, help="จำนวนแถวสูงสุดต่อรอบ ต่อหนึ่งคิว (0 = ไม่จำกัด) ค่าเริ่มต้น 30")
-    p.add_argument("--batch", type=int, default=30, help="จำนวนแถวต่อก้อน: เขียน DB + สถานะลงชีตทีละก้อน")
-    p.add_argument("--workers", type=int, default=6, help="จำนวนงานขนาน (ลดลงถ้าเจอ 429)")
-    p.add_argument("--only-rows", help="ทำเฉพาะแถวในชีตที่ระบุ เช่น 83,102,127-128 (ต้องระบุ --queue ด้วย เพราะเลขแถวเป็นของชีตคิวนั้น)")
-    p.add_argument("--no-retry-errors", action="store_true", help="ไม่ลองแถวที่เป็น Error ซ้ำ (ทำเฉพาะ Waiting)")
-    p.add_argument("--include-blank", action="store_true", help="นับแถวที่คอลัมน์ G ว่าง (แต่มี URL) เป็นงานด้วย")
-    p.add_argument("--no-reconcile", action="store_true", help="ไม่เช็คว่า PDF อยู่ใน DB แล้วหรือยัง")
+    p.add_argument("--limit", type=int, default=30, help="max rows per run, per queue (0 = no limit); default 30")
+    p.add_argument("--batch", type=int, default=30, help="rows per chunk: the DB and the statuses are written one chunk at a time")
+    p.add_argument("--workers", type=int, default=6, help="parallel workers (lower it if you get 429)")
+    p.add_argument("--only-rows", help="only these sheet rows, e.g. 83,102,127-128 (needs --queue, because row numbers belong to that queue sheet)")
+    p.add_argument("--no-retry-errors", action="store_true", help="do not retry Error rows (process only Waiting)")
+    p.add_argument("--include-blank", action="store_true", help="also process rows whose column G is blank (but that have a URL)")
+    p.add_argument("--no-reconcile", action="store_true", help="do not check whether the PDF is already in the DB")
     p.add_argument("--max-mb", type=float, default=LARGE_PDF_MB,
-                   help="ขนาด PDF สูงสุดที่ส่งทั้งไฟล์ (MB) ค่าเริ่มต้น 15 = เท่า Apps Script; ใหญ่กว่านี้ใช้ภาพหน้าปก (ดู --no-thumbnail)")
+                   help="largest PDF sent whole (MB); default 15 = same as the Apps Script; a larger one is sent as its cover image (see --no-thumbnail)")
     p.add_argument("--parse-retries", type=int, default=1,
-                   help="ถ้า JSON ที่ AI ตอบพัง (Error: JSON Parse) ให้เรียก Gemini ซ้ำกี่ครั้ง ค่าเริ่มต้น 1 (0 = ไม่ลองซ้ำ)")
+                   help="how many times to call Gemini again when its JSON is broken (Error: JSON Parse); default 1 (0 = no retry)")
     p.add_argument("--accept-first-report", action="store_true",
-                   help="ถ้า AI ตอบหลายรายงานใน PDF เดียวและไม่มีรายการไหนตรงกับ Doc No ของคิว ให้ใช้รายการแรก (ค่าเริ่มต้น: ขึ้น Error JSON Parse พร้อมรายการเลขที่ที่ AI เจอ)")
+                   help="if the AI returns several reports for one PDF and none matches the queue's Doc No, use the first one (default: Error JSON Parse listing the numbers the AI found)")
     p.add_argument("--max-output-tokens", type=int, default=None,
-                   help="กำหนด maxOutputTokens ของ Gemini (ค่าเริ่มต้นไม่กำหนด เหมือน Apps Script) ใช้เมื่อ JSON Parse พังเพราะคำตอบถูกตัด (finishReason=MAX_TOKENS)")
+                   help="Gemini maxOutputTokens (not set by default, same as the Apps Script); use it when JSON Parse fails because the answer was cut off (finishReason=MAX_TOKENS)")
     p.add_argument("--no-thumbnail", action="store_true",
-                   help="PDF ที่เกิน --max-mb ไม่ใช้ภาพหน้าปกแทน แต่เขียน Error: Too Large (Apps Script จะใช้ภาพหน้าปกเสมอ)")
-    p.add_argument("--dry-run", action="store_true", help="แค่แสดงว่าจะทำแถวไหน (ไม่เรียก Drive/Gemini ไม่เขียนชีต)")
-    p.add_argument("--check-access", action="store_true", help="เช็คว่า service account เปิดไฟล์ PDF ได้ไหม (ไม่เรียก Gemini ไม่เขียนชีต)")
+                   help="for a PDF over --max-mb write Error: Too Large instead of sending the cover image (the Apps Script always sends the cover image)")
+    p.add_argument("--dry-run", action="store_true", help="only list the rows that would be processed (no Drive/Gemini calls, no sheet writes)")
+    p.add_argument("--check-access", action="store_true", help="check that the service account can open the PDF files (no Gemini calls, no sheet writes)")
     return p
 
 
@@ -1189,10 +1189,10 @@ def make_clients(args: argparse.Namespace, need_gemini: bool) -> Clients:
     from google.oauth2 import service_account
 
     if not args.sa_key or not os.path.isfile(args.sa_key):
-        sys.exit("ไม่พบ service account key: ใส่ --sa-key <path> หรือตั้ง GOOGLE_APPLICATION_CREDENTIALS")
+        sys.exit("Service account key not found: pass --sa-key <path> or set GOOGLE_APPLICATION_CREDENTIALS")
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if need_gemini and not api_key:
-        sys.exit("ยังไม่ได้ตั้ง GEMINI_API_KEY (PowerShell:  $env:GEMINI_API_KEY = \"...\")")
+        sys.exit("GEMINI_API_KEY is not set (PowerShell:  $env:GEMINI_API_KEY = \"...\")")
     creds = service_account.Credentials.from_service_account_file(args.sa_key, scopes=SCOPES)
     creds.refresh(Request())
     return Clients(
@@ -1237,15 +1237,15 @@ def run_queues(args: argparse.Namespace, clients: Clients, keys: list[str], log:
         # 큐마다 제목 줄을 출력 (스프레드시트 이름 포함)
         # [TH] พิมพ์หัวข้อของแต่ละคิว (พร้อมชื่อสเปรดชีต)
         # [EN] Print a heading for each queue (including the spreadsheet name)
-        log(("\n" if multi else "") + f"===== คิว {spec.name}: {spec.queue_tab} -> {spec.db_tab}"
-            + (f" | ชีต: {sheet_title}" if sheet_title else "") + " =====")
+        log(("\n" if multi else "") + f"===== Queue {spec.name}: {spec.queue_tab} -> {spec.db_tab}"
+            + (f" | sheet: {sheet_title}" if sheet_title else "") + " =====")
         try:
             summary = run(sub, clients, log=log)
         except SheetsError as e:
             # 한 큐를 읽지 못해도(예: 시트 탭이 없음) 다음 큐는 계속 진행
             # [TH] อ่านคิวหนึ่งไม่ได้ (เช่นไม่มีแท็บชีต) ก็ยังทำคิวถัดไปต่อ
             # [EN] If one queue cannot be read (e.g. the sheet tab is missing), the next queue is still processed
-            log(f"✗ ทำคิว {spec.queue_tab} ไม่ได้: {e}")
+            log(f"✗ Could not process queue {spec.queue_tab}: {e}")
             exit_code = 2
             continue
         total_done += summary.done + summary.reconciled
@@ -1257,10 +1257,10 @@ def run_queues(args: argparse.Namespace, clients: Clients, keys: list[str], log:
                 # 중단 사유(크레딧 소진, 키 오류 등)는 다음 큐에도 그대로 적용되므로 건너뜀
                 # [TH] สาเหตุที่หยุด (เครดิตหมด คีย์ผิด ฯลฯ) จะเกิดกับคิวถัดไปเหมือนกัน จึงข้าม
                 # [EN] The reason for stopping (credits exhausted, bad key, ...) would hit the next queue too, so it is skipped
-                log(f"หยุดก่อนครบ -> ข้ามคิวที่เหลือ: {', '.join(rest)}")
+                log(f"Stopped early -> skipping the remaining queues: {', '.join(rest)}")
             break
     if multi and not (args.dry_run or args.check_access):
-        log(f"\nรวมทุกคิว: Done={total_done}, Error={total_err}")
+        log(f"\nAll queues: Done={total_done}, Error={total_err}")
     return exit_code
 
 
@@ -1273,8 +1273,8 @@ def require_spreadsheet_id(environ: Optional[dict] = None) -> str:
     value = str((environ if environ is not None else os.environ).get(SPREADSHEET_ID_ENV, "")).strip()
     if not value:
         sys.exit(
-            f"ยังไม่ได้ตั้ง {SPREADSHEET_ID_ENV} (ID ของสเปรดชีตเป้าหมาย - ไม่มีค่าเริ่มต้นในโค้ดและไม่มีออปชัน --spreadsheet-id)\n"
-            "  ID คือส่วนใน URL ระหว่าง /d/ กับ /edit  เช่น https://docs.google.com/spreadsheets/d/<ID>/edit\n"
+            f"{SPREADSHEET_ID_ENV} is not set (the target spreadsheet ID - there is no default in the code and no --spreadsheet-id option)\n"
+            "  The ID is the part of the URL between /d/ and /edit, e.g. https://docs.google.com/spreadsheets/d/<ID>/edit\n"
             f'  PowerShell:  $env:{SPREADSHEET_ID_ENV} = "<ID>"')
     return value
 
@@ -1295,13 +1295,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     args.spreadsheet_id = require_spreadsheet_id()
     keys = queues_to_run(args.queue)
     if args.only_rows and len(keys) > 1:
-        sys.exit("--only-rows ใช้ได้กับคิวเดียว: ระบุ --queue dwr หรือ --queue drq ด้วย (เลขแถวเป็นของชีตคิวนั้นๆ)")
+        sys.exit("--only-rows works with one queue: add --queue dwr or --queue drq (row numbers belong to that queue sheet)")
     clients = make_clients(args, need_gemini=not (args.dry_run or args.check_access))
     title, title_error = spreadsheet_title(clients.sheets, args.spreadsheet_id)
     if title:
         sheet_label = f"{title} ({args.spreadsheet_id})"
     else:
-        sheet_label = f"{args.spreadsheet_id} (อ่านชื่อชีตไม่ได้ - ตรวจ ID และการแชร์สิทธิ์ให้ service account: {title_error})"
+        sheet_label = f"{args.spreadsheet_id} (could not read the sheet name - check the ID and that the sheet is shared with the service account: {title_error})"
     print(f"service account: {clients.sa_email} | sheet: {sheet_label} | model: {clients.model}")
     return run_queues(args, clients, keys, sheet_title=title)
 
