@@ -1,0 +1,8 @@
+# secrets และไฟล์ชั่วคราว - ห้าม commit
+sa-key*.json
+*-key.json
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.log
