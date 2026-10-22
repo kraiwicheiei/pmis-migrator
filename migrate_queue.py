@@ -68,6 +68,9 @@ Apps Script(extractDriveFileForAI)와 동일하게 맞춘 점 / [TH] ส่ว�
   PMIS_LEGACY_DRQ_SHEET           --extract 전용: DRQ 큐를 만들 옛 시트 탭 이름 (필수, 코드에 기본값 없음)
                                   [TH] เฉพาะ --extract: ชื่อแท็บชีตเก่าที่ใช้สร้างคิว DRQ (จำเป็น ไม่มีค่าเริ่มต้นในโค้ด)
                                   [EN] --extract only: name of the legacy sheet tab the DRQ queue is built from (required; no default in the code)
+  PMIS_LEGACY_SPREADSHEET_ID      --extract 전용: 옛 시트 탭이 들어 있는 스프레드시트 (ID 또는 URL). 비우면 PMIS_SPREADSHEET_ID 와 같은 파일. --legacy-spreadsheet 가 최우선
+                                  [TH] เฉพาะ --extract: สเปรดชีต (ID หรือ URL) ที่มีแท็บชีตเก่า ถ้าว่างจะใช้ไฟล์เดียวกับ PMIS_SPREADSHEET_ID; --legacy-spreadsheet สำคัญที่สุด
+                                  [EN] --extract only: the spreadsheet (ID or URL) that holds the legacy tabs; empty = the same file as PMIS_SPREADSHEET_ID; --legacy-spreadsheet wins
 
 위 변수는 스크립트 옆의 .env 파일(KEY=value)에 적어 둘 수 있음 (.env.example 참고). 이미 설정된 환경 변수가 우선
 [TH] ตัวแปรข้างบนเขียนไว้ในไฟล์ .env ข้างสคริปต์ได้ (KEY=value ดู .env.example) ตัวแปรที่ตั้งไว้ในสภาพแวดล้อมแล้วมีสิทธิ์เหนือกว่า
@@ -96,6 +99,10 @@ from typing import Any, Callable, Optional
 # [TH] ID ชีตเป้าหมายไม่มีค่าเริ่มต้นในโค้ด อ่านจากตัวแปรสภาพแวดล้อมนี้เท่านั้น (ด้านล่างคือชื่อตัวแปร)
 # [EN] The target sheet ID has no default in the code and is read only from this environment variable (below is the variable name)
 SPREADSHEET_ID_ENV = "PMIS_SPREADSHEET_ID"
+# --extract 가 옛 탭을 읽어 올 스프레드시트 (선택. 비우면 대상 스프레드시트와 같은 파일)
+# [TH] สเปรดชีตที่ --extract ใช้อ่านแท็บเก่า (ไม่บังคับ ถ้าว่างจะใช้ไฟล์เดียวกับสเปรดชีตเป้าหมาย)
+# [EN] The spreadsheet --extract reads the legacy tabs from (optional; empty = the same file as the target spreadsheet)
+LEGACY_SPREADSHEET_ID_ENV = "PMIS_LEGACY_SPREADSHEET_ID"
 # Code_Config.js 의 CONFIG_GEMINI_MODEL 과 같은 기본 모델. 둘은 서로 독립적이므로(이 스크립트는 그 파일을 읽지 않음) 한쪽을 바꾸면 다른 쪽도 바꾸세요
 # [TH] โมเดลเริ่มต้นตัวเดียวกับ CONFIG_GEMINI_MODEL ใน Code_Config.js ทั้งสองฝั่งเป็นอิสระต่อกัน (สคริปต์นี้ไม่อ่านไฟล์นั้น) ถ้าแก้ฝั่งหนึ่งให้แก้อีกฝั่งด้วย
 # [EN] The same default model as CONFIG_GEMINI_MODEL in Code_Config.js. The two are independent (this script does not read that file): if you change one, change the other
@@ -1437,17 +1444,33 @@ def extract_queue(args: argparse.Namespace, clients: Clients, key: str, log: Cal
     sess, sid = clients.sheets, args.spreadsheet_id
     legacy_tab = args.legacy_tabs[key]
     summary = ExtractSummary()
+    # 옛 탭을 읽는 스프레드시트 (기본은 큐를 쓰는 대상 스프레드시트와 같은 파일)
+    # [TH] สเปรดชีตที่อ่านแท็บเก่า (ค่าเริ่มต้นคือไฟล์เดียวกับสเปรดชีตเป้าหมายที่เขียนคิว)
+    # [EN] The spreadsheet the legacy tab is read from (by default the same file as the target spreadsheet the queue is written to)
+    legacy_sid = getattr(args, "legacy_spreadsheet_id", None) or sid
+    separate = legacy_sid != sid
 
-    tabs = list_tabs(sess, sid)
-    if legacy_tab not in tabs:
-        raise SheetsError(f"tab '{legacy_tab}' not found in the spreadsheet (tabs found: {', '.join(tabs) or '-'}) - check {spec.legacy_env}")
-    rows = read_legacy_rows(sess, sid, legacy_tab, spec.legacy_end_col, tabs[legacy_tab][1])
+    try:
+        legacy_tabs_found = list_tabs(sess, legacy_sid)
+    except SheetsError as e:
+        if not separate:
+            raise
+        raise SheetsError(f"cannot open the legacy spreadsheet {legacy_sid} ({e}) - check the ID and share it with the service account"
+                          + (f" {clients.sa_email}" if clients.sa_email else "")) from e
+    if legacy_tab not in legacy_tabs_found:
+        where = f"in the legacy spreadsheet {legacy_sid}" if separate else "in the spreadsheet"
+        raise SheetsError(f"tab '{legacy_tab}' not found {where} (tabs found: {', '.join(legacy_tabs_found) or '-'}) - check {spec.legacy_env}")
+    tabs = list_tabs(sess, sid) if separate else legacy_tabs_found
+    rows = read_legacy_rows(sess, legacy_sid, legacy_tab, spec.legacy_end_col, legacy_tabs_found[legacy_tab][1])
     header_cells = next((cells for n, cells in rows if n == LEGACY_HEADER_ROW), [])
     data_rows = [(n, cells) for n, cells in rows if n >= LEGACY_FIRST_DATA_ROW]
     items, stats = build_queue_items(header_cells, data_rows, spec.legacy_end_col)
     summary.items, summary.stats = len(items), stats
     summary.completed = sum(1 for it in items if it.completed)
 
+    if separate:
+        legacy_title, _ = spreadsheet_title(sess, legacy_sid)
+        log(f"[{spec.name}] Legacy spreadsheet: {legacy_title + ' ' if legacy_title else ''}({legacy_sid}) -> queue is written to the target spreadsheet ({sid})")
     log(f"[{spec.name}] Read tab '{legacy_tab}': {stats.rows} data rows, {stats.dated_rows} with a Date -> "
         f"{len(items)} unique items (C={summary.completed}, P={len(items) - summary.completed}), {stats.merged} duplicate cells merged")
     if stats.no_link:
@@ -1513,6 +1536,34 @@ def require_legacy_sheet_names(keys: list[str], environ: Optional[dict] = None) 
     return names
 
 
+def parse_spreadsheet_id(value: Any) -> str:
+    """
+    스프레드시트 ID 또는 전체 URL(.../d/<ID>/edit...)에서 ID 만 꺼냄
+    [TH] ดึงเฉพาะ ID จาก ID หรือ URL เต็ม (.../d/<ID>/edit...)
+    [EN] Takes just the ID from a spreadsheet ID or a full URL (.../d/<ID>/edit...)
+    """
+    text = str(value or "").strip()
+    m = re.search(r"/d/([A-Za-z0-9_-]+)", text)
+    return m.group(1) if m else text
+
+
+def resolve_legacy_spreadsheet_id(cli_value: Optional[str], target_id: str, environ: Optional[dict] = None) -> str:
+    """
+    옛 탭을 읽을 스프레드시트 ID: --legacy-spreadsheet > PMIS_LEGACY_SPREADSHEET_ID > 대상 스프레드시트(같은 파일)
+    [TH] ID สเปรดชีตที่อ่านแท็บเก่า: --legacy-spreadsheet > PMIS_LEGACY_SPREADSHEET_ID > สเปรดชีตเป้าหมาย (ไฟล์เดียวกัน)
+    [EN] The ID of the spreadsheet the legacy tabs are read from: --legacy-spreadsheet > PMIS_LEGACY_SPREADSHEET_ID > the target spreadsheet (same file)
+    """
+    env = environ if environ is not None else os.environ
+    raw = (cli_value or "").strip() or str(env.get(LEGACY_SPREADSHEET_ID_ENV, "")).strip()
+    if not raw:
+        return target_id
+    value = parse_spreadsheet_id(raw)
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        sys.exit(f"The legacy spreadsheet is not a valid ID or URL: {raw!r}\n"
+                 "  Use the ID (the part of the URL between /d/ and /edit) or the whole spreadsheet URL")
+    return value
+
+
 def run_extract(args: argparse.Namespace, clients: Clients, keys: list[str], log: Callable[[str], None] = print,
                 sheet_title: str = "") -> int:
     """
@@ -1568,6 +1619,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--check-access", action="store_true", help="check that the service account can open the PDF files (no Gemini calls, no sheet writes)")
     p.add_argument("--extract", action="store_true",
                    help="build the queues from the legacy sheets (replaces extractLegacyDwrLinks / extractLegacyDrqLinks); no Drive/Gemini calls; needs PMIS_LEGACY_DWR_SHEET / PMIS_LEGACY_DRQ_SHEET; works with --dry-run and --queue")
+    p.add_argument("--legacy-spreadsheet", default=None, metavar="ID_OR_URL",
+                   help="with --extract: the spreadsheet file (ID or URL) that holds the legacy tabs; the queues are still written to PMIS_SPREADSHEET_ID. "
+                        "Default: PMIS_LEGACY_SPREADSHEET_ID, or the same file as PMIS_SPREADSHEET_ID. Share it with the service account")
     p.add_argument("--overwrite", action="store_true",
                    help="with --extract: allow overwriting a queue that already has Done/Error rows (the Apps Script always did); without it such a queue is left untouched")
     return p
@@ -1705,8 +1759,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.only_rows or args.check_access:
             sys.exit("--extract cannot be combined with --only-rows or --check-access")
         args.legacy_tabs = require_legacy_sheet_names(keys)
+        args.legacy_spreadsheet_id = resolve_legacy_spreadsheet_id(args.legacy_spreadsheet, args.spreadsheet_id)
     elif args.overwrite:
         sys.exit("--overwrite only works together with --extract")
+    elif args.legacy_spreadsheet:
+        sys.exit("--legacy-spreadsheet only works together with --extract")
     if args.only_rows and len(keys) > 1:
         sys.exit("--only-rows works with one queue: add --queue dwr or --queue drq (row numbers belong to that queue sheet)")
     clients = make_clients(args, need_gemini=not (args.dry_run or args.check_access or args.extract))

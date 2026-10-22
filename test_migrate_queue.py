@@ -976,20 +976,35 @@ class FakeLegacy:
     [EN] Fake spreadsheet holding the legacy sheets (cell level) + the queue sheets
     """
 
-    def __init__(self, grids=None, queues=None, row_count=12):
+    def __init__(self, grids=None, queues=None, row_count=12, legacy_sid=None):
         self.grids = grids if grids is not None else {"LEGACY-DWR": legacy_grid(), "LEGACY-DRQ": legacy_grid()}
         self.queues = queues if queues is not None else {}
+        # 값이 있으면 옛 탭은 그 ID 의 별도 스프레드시트에만, 큐는 SID 에만 있음
+        # [TH] ถ้ามีค่า แท็บเก่าจะอยู่เฉพาะในสเปรดชีตแยก ID นั้น ส่วนคิวอยู่ที่ SID เท่านั้น
+        # [EN] When set, the legacy tabs live only in that separate spreadsheet and the queues only in SID
+        self.legacy_sid = legacy_sid
+        self.sheets_calls = []
         self.row_count = row_count
         self.events = []
         self.grid_reads = []
         self.written = []
 
-    def tab_names(self):
+    def tab_names(self, sid="SID"):
+        if self.legacy_sid:
+            return list(self.grids) if sid == self.legacy_sid else list(self.queues)
         return list(self.grids) + list(self.queues)
 
     def sheets_request(self, method, url, **kw):
         path, params = urllib.parse.unquote(url), kw.get("params") or {}
         base = f"{mq.SHEETS_BASE}/SID"
+        self.sheets_calls.append((method, path))
+        if self.legacy_sid and path == f"{mq.SHEETS_BASE}/{self.legacy_sid}":
+            if params.get("fields") == "properties.title":
+                return Resp(200, {"properties": {"title": "Legacy Spreadsheet"}})
+            if "includeGridData" not in params:
+                return Resp(200, {"sheets": [{"properties": {"sheetId": i, "title": t, "gridProperties": {"rowCount": self.row_count}}}
+                                              for i, t in enumerate(self.tab_names(self.legacy_sid))]})
+            base = path
         if method == "GET" and path == base:
             if params.get("fields") == "properties.title":
                 return Resp(200, {"properties": {"title": "Example Spreadsheet"}})
@@ -1003,7 +1018,7 @@ class FakeLegacy:
                 block = {"startRow": r1 - 1, "rowData": [{"values": r} if r else {} for r in rows]}
                 return Resp(200, {"sheets": [{"data": [block]}]})
             return Resp(200, {"sheets": [{"properties": {"sheetId": i, "title": t, "gridProperties": {"rowCount": self.row_count}}}
-                                          for i, t in enumerate(self.tab_names())]})
+                                          for i, t in enumerate(self.tab_names("SID"))]})
         if method == "GET" and "/values/" in path:
             tab = re.match(r"'(.+)'!A:G$", path.split("/values/")[1]).group(1)
             return Resp(200, {"values": self.queues[tab]}) if tab in self.queues else Resp(400, text="Unable to parse range")
@@ -1222,7 +1237,7 @@ def test_legacy_sheet_names_come_only_from_the_environment():
 def extract_main(monkeypatch, argv, w=None, env=None, need=None):
     w = w or FakeLegacy()
     monkeypatch.setenv("PMIS_SPREADSHEET_ID", "SID")
-    for name in ("PMIS_LEGACY_DWR_SHEET", "PMIS_LEGACY_DRQ_SHEET"):
+    for name in ("PMIS_LEGACY_DWR_SHEET", "PMIS_LEGACY_DRQ_SHEET", "PMIS_LEGACY_SPREADSHEET_ID"):
         monkeypatch.delenv(name, raising=False)
     for name, value in (env if env is not None else {"PMIS_LEGACY_DWR_SHEET": "LEGACY-DWR", "PMIS_LEGACY_DRQ_SHEET": "LEGACY-DRQ"}).items():
         monkeypatch.setenv(name, value)
@@ -1291,3 +1306,72 @@ def test_load_env_file_sets_missing_variables_but_never_overrides(tmp_path, monk
 
 def test_load_env_file_does_nothing_without_a_file(tmp_path):
     assert mq.load_env_file(str(tmp_path / "missing.env")) is False
+
+
+# --- 옛 시트를 다른 스프레드시트 파일에서 읽기 / legacy tabs in another file / อ่านแท็บเก่าจากไฟล์สเปรดชีตอื่น ---
+LEGACY_FILE = "LEGACYFILEID123"
+
+
+def test_parse_spreadsheet_id_accepts_an_id_or_a_full_url():
+    assert mq.parse_spreadsheet_id("  abc_DEF-123 ") == "abc_DEF-123"
+    assert mq.parse_spreadsheet_id("https://docs.google.com/spreadsheets/d/abc_DEF-123/edit?gid=0#gid=0") == "abc_DEF-123"
+    assert mq.parse_spreadsheet_id("https://docs.google.com/spreadsheets/u/1/d/abc123/edit") == "abc123"
+    assert mq.parse_spreadsheet_id(None) == ""
+
+
+def test_resolve_legacy_spreadsheet_id_priority_and_validation():
+    env = {"PMIS_LEGACY_SPREADSHEET_ID": "FROM_ENV"}
+    assert mq.resolve_legacy_spreadsheet_id(None, "TARGET", {}) == "TARGET"                      # default: the same file
+    assert mq.resolve_legacy_spreadsheet_id("  ", "TARGET", {}) == "TARGET"
+    assert mq.resolve_legacy_spreadsheet_id(None, "TARGET", env) == "FROM_ENV"
+    assert mq.resolve_legacy_spreadsheet_id("https://docs.google.com/spreadsheets/d/FROM_CLI/edit", "TARGET", env) == "FROM_CLI"
+    with pytest.raises(SystemExit) as e:
+        mq.resolve_legacy_spreadsheet_id("not a valid id!", "TARGET", {})
+    assert "not a valid ID or URL" in str(e.value.code)
+
+
+def test_extract_reads_the_legacy_tab_from_another_spreadsheet_and_writes_to_the_target():
+    w = FakeLegacy(legacy_sid=LEGACY_FILE)
+    summary, logs = extract_logs(w, legacy_spreadsheet_id=LEGACY_FILE, spreadsheet_id="SID")
+    assert w.queues["MIGRATION_QUEUE"] == [mq.QUEUE_HEADER] + DWR_ROWS and summary.written == 4
+    assert [e[0] for e in w.events] == ["addSheet", "clear", "header", "append"]                 # the queue is written to the target file only
+    assert any("Legacy spreadsheet: Legacy Spreadsheet (LEGACYFILEID123)" in m for m in logs)
+    assert all(LEGACY_FILE not in path for method, path in w.sheets_calls if method != "GET")
+
+
+def test_extract_from_another_spreadsheet_still_checks_the_target_for_existing_progress():
+    existing = [mq.QUEUE_HEADER, qrow(1, "Done")]
+    w = FakeLegacy(legacy_sid=LEGACY_FILE, queues={"MIGRATION_QUEUE": [list(r) for r in existing]})
+    summary, _ = extract_logs(w, legacy_spreadsheet_id=LEGACY_FILE)
+    assert summary.refused == "Done 1, Error 0" and w.events == [] and w.queues["MIGRATION_QUEUE"] == existing
+
+
+def test_extract_without_a_legacy_spreadsheet_id_keeps_reading_the_target_file():
+    w = FakeLegacy()
+    summary, logs = extract_logs(w, legacy_spreadsheet_id=None)
+    assert summary.written == 4 and not any("Legacy spreadsheet:" in m for m in logs)
+
+
+def test_extract_from_another_spreadsheet_explains_a_missing_tab_and_an_unshared_file():
+    w = FakeLegacy(legacy_sid=LEGACY_FILE, grids={"OTHER": legacy_grid()})
+    with pytest.raises(mq.SheetsError) as e:
+        extract_logs(w, legacy_spreadsheet_id=LEGACY_FILE)
+    assert f"in the legacy spreadsheet {LEGACY_FILE}" in str(e.value) and "OTHER" in str(e.value) and "PMIS_LEGACY_DWR_SHEET" in str(e.value)
+    with pytest.raises(mq.SheetsError) as e:                                                   # an unshared file answers 404/403
+        extract_logs(FakeLegacy(), legacy_spreadsheet_id="NOT_SHARED")
+    assert "cannot open the legacy spreadsheet NOT_SHARED" in str(e.value) and "share it with the service account sa@x" in str(e.value)
+
+
+def test_main_extract_takes_the_legacy_spreadsheet_from_the_option_or_the_environment(monkeypatch):
+    url = f"https://docs.google.com/spreadsheets/d/{LEGACY_FILE}/edit#gid=0"
+    code, w = extract_main(monkeypatch, ["--extract", "--queue", "dwr", "--legacy-spreadsheet", url], w=FakeLegacy(legacy_sid=LEGACY_FILE))
+    assert code == 0 and w.queues["MIGRATION_QUEUE"][1:] == DWR_ROWS
+    code, w = extract_main(monkeypatch, ["--extract", "--queue", "dwr"], w=FakeLegacy(legacy_sid=LEGACY_FILE),
+                           env={"PMIS_LEGACY_DWR_SHEET": "LEGACY-DWR", "PMIS_LEGACY_SPREADSHEET_ID": LEGACY_FILE})
+    assert code == 0 and w.queues["MIGRATION_QUEUE"][1:] == DWR_ROWS
+
+
+def test_legacy_spreadsheet_option_needs_extract(monkeypatch):
+    with pytest.raises(SystemExit) as e:
+        main_with(monkeypatch, ["--queue", "dwr", "--legacy-spreadsheet", "abc"], RunRecorder())
+    assert "--legacy-spreadsheet only works together with --extract" in str(e.value.code)
