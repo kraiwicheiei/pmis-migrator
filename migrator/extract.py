@@ -12,9 +12,10 @@ from typing import Callable
 from .config import SHEETS_BASE
 from .legacy_sheet import ExtractStats, LEGACY_FIRST_DATA_ROW, LEGACY_HEADER_ROW, build_queue_items, read_legacy_rows, sheet_cell_text
 from .models import Clients
-from .queue_writer import QUEUE_HEADER, REFRESH_COL, apply_merge, plan_merge, queue_progress, refresh_stamp, write_queue, write_refresh_time
+from .queue_writer import QUEUE_HEADER, apply_merge, plan_merge, queue_progress, write_queue
 from .sheets import SheetsError, list_tabs, read_values, sheets_call, spreadsheet_title
 from .specs import SPECS
+from .stamps import REFRESH_COL, time_stamp, write_refresh_time
 
 
 @dataclass
@@ -128,7 +129,7 @@ def extract_queue(args: argparse.Namespace, clients: Clients, key: str, log: Cal
     # 행은 이미 기록됐으므로 시각을 쓰지 못해도(예: 탭의 열이 7개뿐) extract 자체는 실패로 보지 않음
     # [TH] แถวถูกเขียนไปแล้ว ถ้าเขียนเวลาไม่ได้ (เช่นแท็บมีแค่ 7 คอลัมน์) ก็ไม่นับว่า extract ล้มเหลว
     # [EN] The rows are already written, so if the time cannot be written (e.g. the tab has only 7 columns) the extract itself is not treated as failed
-    stamp = refresh_stamp()
+    stamp = time_stamp()
     try:
         write_refresh_time(sess, sid, spec.queue_tab, stamp)
         summary.refreshed_at = stamp

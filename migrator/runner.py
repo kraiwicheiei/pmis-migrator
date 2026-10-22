@@ -18,6 +18,7 @@ from .processing import process_job
 from .reports import build_db_row
 from .sheets import SheetsError, append_rows, read_values, write_statuses
 from .specs import QueueSpec, SPECS
+from .stamps import MIGRATION_COL, time_stamp, write_migration_time
 from .utils import chunked, col_letter, error_text, extract_file_id, parse_row_spec
 
 
@@ -60,6 +61,10 @@ class Summary:
     errors: dict = field(default_factory=dict)
     skipped: int = 0
     stopped_reason: str = ""
+    # 큐 시트에 기록한 마이그레이션 종료 시각 (쓰지 못했으면 빈 문자열)
+    # [TH] เวลาที่ migration จบซึ่งเขียนลงชีตคิว (ถ้าเขียนไม่ได้เป็นข้อความว่าง)
+    # [EN] The migration finish time written to the queue sheet (empty when it could not be written)
+    migrated_at: str = ""
 
 
 def explain_no_jobs(values: list[list[str]], sid: str, spec: QueueSpec, *, retry_errors: bool, include_blank: bool,
@@ -281,6 +286,19 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
         pin, pout = PRICES_USD_PER_M.get(clients.model, (None, None))
         cost = f" ≈ ${usage.prompt / 1e6 * pin + usage.output / 1e6 * pout:.3f} (list price)" if pin else ""
         log(f"Gemini calls: {usage.calls}, input {usage.prompt:,} tok, output(+thinking) {usage.output:,} tok{cost}")
+    # 실제 실행이 끝날 때마다 이 큐 시트에 마이그레이션 종료 시각을 기록 (--dry-run / --check-access 는 위에서 이미 끝남).
+    # 쓰지 못해도 실행 결과는 그대로이므로 경고만 남김
+    # [TH] ทุกครั้งที่รันจริงจบ จะเขียนเวลาที่ migration จบลงชีตคิวนี้ (--dry-run / --check-access จบไปก่อนหน้านี้แล้ว)
+    #      ถ้าเขียนไม่ได้ ผลการรันไม่เปลี่ยน จึงแค่เตือน
+    # [EN] Every time a real run finishes, the migration finish time is written to this queue sheet (--dry-run / --check-access returned above).
+    #      A failed write does not change the result of the run, so it only warns
+    stamp = time_stamp()
+    try:
+        write_migration_time(clients.sheets, sid, spec.queue_tab, stamp)
+        summary.migrated_at = stamp
+        log(f"Migration time written to {spec.queue_tab}!{MIGRATION_COL}2: {stamp}")
+    except SheetsError as e:
+        log(f"⚠ The run finished, but the migration time could not be written to {spec.queue_tab}!{MIGRATION_COL}1:{MIGRATION_COL}2: {e}")
     return summary
 
 

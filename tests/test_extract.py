@@ -4,7 +4,6 @@
 [EN] Tests for --extract: rebuild, merge, reading from another file, the refresh time
 """
 
-import datetime
 import json
 
 import pytest
@@ -12,8 +11,9 @@ import pytest
 from migrator import legacy_sheet, queue_writer
 from migrator.extract import extract_queue, run_extract
 from migrator.legacy_sheet import LegacyItem
-from migrator.queue_writer import MergePlan, QUEUE_HEADER, QUEUE_REFRESH_LABEL, REFRESH_COL, apply_merge, plan_merge, refresh_stamp
+from migrator.queue_writer import MergePlan, QUEUE_HEADER, apply_merge, plan_merge
 from migrator.sheets import SheetsError
+from migrator.stamps import QUEUE_REFRESH_LABEL, REFRESH_COL
 
 from tests.fakes import NON_ENGLISH, URL, qrow
 from tests.legacy_fakes import DRQ_ROWS, DWR_ROWS, FakeLegacy, LEGACY_FILE, LEGACY_HEADER, STAMP, extract_logs, legacy_grid, merge_queue, mk, txt, xargs
@@ -207,11 +207,6 @@ def test_extract_from_another_spreadsheet_explains_a_missing_tab_and_an_unshared
 
 
 # --- 새로고침 시각 / refresh time / เวลา refresh ---
-def test_refresh_stamp_is_thai_time():
-    assert refresh_stamp() == STAMP
-    assert refresh_stamp(datetime.datetime(2026, 1, 1, 18, 0, 0, tzinfo=datetime.timezone.utc)) == "2026-01-02 01:00:00 (UTC+7)"   # crosses midnight
-
-
 def test_extract_writes_the_refresh_time_to_each_queue_sheet():
     w = FakeLegacy()
     summary, logs = extract_logs(w, "dwr")

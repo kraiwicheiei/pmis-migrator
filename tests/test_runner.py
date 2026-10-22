@@ -9,8 +9,10 @@ import pytest
 from migrator.reports import build_db_row
 from migrator.runner import run, select_jobs
 from migrator.specs import SPECS
+from migrator.stamps import MIGRATION_LABEL
 
 from tests.fakes import DWR_JSON, FID, FOLDER, FakeWorld, Resp, URL, ns, qrow, run_logs, world
+from tests.legacy_fakes import STAMP
 
 
 def test_select_jobs():
@@ -216,3 +218,43 @@ def test_select_jobs_carries_doc_no_from_column_a():
     vals[1][0] = "  ACME-DWR-CIV-0231 "
     assert [j.doc_no for j in select_jobs(vals, retry_errors=True, include_blank=False, only_rows=None)] == ["ACME-DWR-CIV-0231"]
     assert SPECS["dwr"].no_key == "DWR_No" and SPECS["drq"].no_key == "DRQ_No"
+
+
+# --- 마이그레이션 실행 시각 / migration run time / เวลาที่รัน migration ---
+def test_a_real_run_writes_the_migration_time_to_the_queue_sheet():
+    w = world(["Waiting"] * 2)
+    logs = []
+    s = run(ns(), w.clients(), log=logs.append)
+    assert w.migration_time == [[MIGRATION_LABEL, STAMP]] and s.migrated_at == STAMP
+    assert any(f"Migration time written to MIGRATION_QUEUE!K2: {STAMP}" in m for m in logs)
+    assert [r[6] for r in w.queue[1:]] == ["Done", "Done"]                          # the time cells never touch the statuses
+
+
+def test_the_migration_time_is_written_for_every_real_run_even_with_nothing_to_do_or_a_stopped_run():
+    w = world(["Done"])
+    run(ns(), w.clients(), log=lambda m: None)
+    assert w.migration_time == [[MIGRATION_LABEL, STAMP]]
+    w = world(["Waiting"] * 3)
+    w.gemini_default = lambda: Resp(402, text='{"error":{"status":"RESOURCE_EXHAUSTED"}}')
+    s = run(ns(workers=1), w.clients(), log=lambda m: None)
+    assert s.stopped_reason and w.migration_time == [[MIGRATION_LABEL, STAMP]]
+    w = world(["Waiting"])
+    run(ns(), w.clients(), log=lambda m: None)
+    run(ns(), w.clients(), log=lambda m: None)
+    assert len(w.migration_time) == 2                                              # every run overwrites K1:K2
+
+
+def test_dry_run_and_check_access_do_not_write_the_migration_time():
+    w = world(["Waiting"] * 2)
+    run(ns(dry_run=True), w.clients(), log=lambda m: None)
+    run(ns(check_access=True), w.clients(), log=lambda m: None)
+    assert w.migration_time == []
+
+
+def test_a_failed_migration_time_write_does_not_change_the_result_of_the_run():
+    w = world(["Waiting"] * 2)
+    w.fail_migration_time = True
+    logs = []
+    s = run(ns(), w.clients(), log=logs.append)
+    assert s.done == 2 and s.migrated_at == "" and w.migration_time == []
+    assert any("The run finished, but the migration time could not be written to MIGRATION_QUEUE!K1:K2" in m for m in logs)

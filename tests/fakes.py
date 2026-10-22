@@ -73,6 +73,9 @@ class FakeWorld:
         self.appends = []
         self.batch_updates = []
         self.fail_append = False
+        # 마이그레이션 시각(K1:K2): 쓴 값 목록 / 실패 시뮬레이션 / [TH] เวลา migration (K1:K2): ค่าที่เขียน / จำลองให้ล้มเหลว / [EN] The migration time (K1:K2): the values written / simulate a failure
+        self.migration_time = []
+        self.fail_migration_time = False
         self.lock = threading.Lock()
 
     # --- sheets session ---
@@ -85,6 +88,12 @@ class FakeWorld:
             if a1.startswith("'DB_DWR'!R2"):
                 return Resp(200, {"values": [[r[17]] for r in self.db[1:] if len(r) > 17]})
             raise AssertionError(a1)
+        if method == "PUT" and path.endswith("!K1:K2"):
+            assert kw["params"]["valueInputOption"] == "RAW"
+            if self.fail_migration_time:
+                return Resp(400, text="Range exceeds grid limits")
+            self.migration_time.append([r[0] for r in kw["json"]["values"]])
+            return Resp(200, {})
         if method == "POST" and path.endswith(":append"):
             if self.fail_append:
                 return Resp(500, text="boom")

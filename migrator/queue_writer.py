@@ -5,11 +5,9 @@
 """
 from __future__ import annotations
 
-import datetime
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
-from . import clock
 from .config import SHEETS_BASE
 from .legacy_sheet import LegacyItem
 from .sheets import append_rows, sheets_call, values_url
@@ -23,15 +21,6 @@ QUEUE_HEADER = ["Doc No", "Date", "Discipline", "PDF URL", "Folder URL", "Status
 EXTRACT_ROWS_PER_WRITE = 2000
 
 EXTRACT_UPDATES_PER_WRITE = 500
-
-# --extract 가 끝난 시각을 적는 칸: 큐 시트의 I1(라벨) / I2(시각). A~G열(큐 데이터) 밖이고 H열은 비워 둠
-# [TH] ช่องที่ --extract เขียนเวลาที่เสร็จ: I1 (ป้ายชื่อ) / I2 (เวลา) ของชีตคิว อยู่นอกคอลัมน์ A~G (ข้อมูลคิว) และเว้นคอลัมน์ H ไว้ว่าง
-# [EN] Where --extract writes when it finished: I1 (label) / I2 (time) of the queue sheet, outside columns A-G (the queue data) with column H left empty
-REFRESH_COL = "I"
-
-QUEUE_REFRESH_LABEL = "Last extract (refresh time)"
-
-REFRESH_TZ = datetime.timezone(datetime.timedelta(hours=7))
 
 
 def queue_progress(values: list[list[str]]) -> dict[str, int]:
@@ -67,15 +56,6 @@ def write_queue(sess: Any, sid: str, tab: str, rows: list[list]) -> None:
                  json={"majorDimension": "ROWS", "values": [QUEUE_HEADER]})
     for i in range(0, len(rows), EXTRACT_ROWS_PER_WRITE):
         append_rows(sess, sid, tab, rows[i:i + EXTRACT_ROWS_PER_WRITE], value_input="RAW")
-
-
-def refresh_stamp(now: Optional[datetime.datetime] = None) -> str:
-    """
-    큐 시트에 적는 '마지막 extract 시각' 문자열 (태국 시간 UTC+7)
-    [TH] ข้อความเวลา "extract ล่าสุด" ที่เขียนลงชีตคิว (เวลาไทย UTC+7)
-    [EN] The "last extract" time text written to the queue sheet (Thai time, UTC+7)
-    """
-    return (now or clock.NOW()).astimezone(REFRESH_TZ).strftime("%Y-%m-%d %H:%M:%S") + " (UTC+7)"
 
 
 @dataclass
@@ -154,13 +134,3 @@ def apply_merge(sess: Any, sid: str, tab: str, plan: MergePlan) -> None:
         append_rows(sess, sid, tab, rows[i:i + EXTRACT_ROWS_PER_WRITE], value_input="RAW")
 
 
-def write_refresh_time(sess: Any, sid: str, tab: str, stamp: str) -> None:
-    """
-    I1 = 라벨, I2 = 시각. 큐 데이터(A~G열) 밖이라 처리/중복 확인에 영향이 없음. write_queue 가 시트를 비운 뒤에 호출
-    [TH] I1 = ป้ายชื่อ, I2 = เวลา อยู่นอกข้อมูลคิว (คอลัมน์ A~G) จึงไม่กระทบการประมวลผล/ตรวจซ้ำ เรียกหลัง write_queue ล้างชีตแล้ว
-    [EN] I1 = label, I2 = time. Outside the queue data (columns A-G), so processing and the duplicate check are not affected.
-         Called after write_queue has cleared the sheet
-    """
-    quoted = tab.replace("'", "''")
-    sheets_call(sess, "PUT", values_url(sid, f"'{quoted}'!{REFRESH_COL}1:{REFRESH_COL}2"), params={"valueInputOption": "RAW"},
-                 json={"majorDimension": "ROWS", "values": [[QUEUE_REFRESH_LABEL], [stamp]]})

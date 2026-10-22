@@ -131,6 +131,7 @@ To run: Actions tab > **Migrate queue** > Run workflow, then choose `mode`: `dry
 
 ## Good to know
 
+- **Last migration time:** every real run (not `--dry-run` / `--check-access`) writes when it finished to the queue sheet it processed: `K1` = `Last migration run (finish time)` and `K2` = the time in Thai time (UTC+7), e.g. `2026-10-22 14:05:33 (UTC+7)`. It is written for each queue that was run (a queue skipped because the run stopped early is not touched) and even when there was nothing to process. It sits next to the `--extract` refresh time (`I1:I2`), outside the queue data (columns A-G). If the cell cannot be written (for example a tab with fewer than 11 columns) the run is not affected; it only warns.
 - Rows whose column G is `Waiting` **or `Error…`** are processed (errors are retried automatically); `Done` rows are skipped. Use `--no-retry-errors` to process only `Waiting`.
 - Work is done in chunks (`--batch 30`): one DB write per chunk, and only then are the rows marked `Done`, so a failed DB write never leaves a `Done` row without data.
 - A **402 / 401 / 403** from Gemini (credits exhausted / bad key) stops the whole run immediately and leaves the remaining rows untouched; repeated **429** responses also stop the run.

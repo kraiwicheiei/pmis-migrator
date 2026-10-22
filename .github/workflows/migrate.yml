@@ -183,7 +183,7 @@ jobs:
           # Actions logs are readable by anyone when the repository is public, so the full output (file IDs, sheet name,
           # row errors that quote text from the PDFs) only goes to a temporary file on the runner. The log shows the
           # counts only; the per-row details are in column G of the queue sheet.
-          safe_lines='^(Queue |Rows to process|Finished:|All queues|Of the Done rows|Stopped early|Gemini calls:|✗ Could not process queue|\[MIGRATION_QUEUE(_DRQ)?\] Reachable|\(dry-run)'
+          safe_lines='^(Queue |Rows to process|Finished:|All queues|Of the Done rows|Stopped early|Gemini calls:|Migration time written to|⚠ The run finished, but the migration time|✗ Could not process queue|\[MIGRATION_QUEUE(_DRQ)?\] Reachable|\(dry-run)'
           echo "Running: python migrate_queue.py ${args[*]}"
           status=0
           python migrate_queue.py "${args[@]}" > "$RUNNER_TEMP/run.log" 2>&1 || status=$?
@@ -194,7 +194,10 @@ jobs:
               | sed -E "s/Read tab '.*': /Read legacy tab: /; s/^(✗ Could not build queue [A-Z_]+).*/\1 - run the script locally for the reason/; s/^(  ⚠ The rows are written, but the refresh time could not be written).*/\1 (run locally for the reason)/" \
               > "$RUNNER_TEMP/counts.log" || true
           else
-            grep -E "$safe_lines" "$RUNNER_TEMP/run.log" > "$RUNNER_TEMP/counts.log" || true
+            # the warning carries the Sheets error text: keep only its first part
+            grep -E "$safe_lines" "$RUNNER_TEMP/run.log" \
+              | sed -E "s/^(⚠ The run finished, but the migration time could not be written).*/\1 (run locally for the reason)/" \
+              > "$RUNNER_TEMP/counts.log" || true
           fi
           cat "$RUNNER_TEMP/counts.log"
           if [[ $status -ne 0 ]]; then
