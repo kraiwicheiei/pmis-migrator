@@ -106,28 +106,32 @@ python migrate_queue.py --extract --queue drq   # เฉพาะคิวเด
 
 ## รันบน GitHub Actions
 
-`.github/workflows/migrate.yml` รันสคริปต์ตัวเดียวกันบน runner ของ GitHub จึงไม่ต้องเปิดคอมค้างไว้ repo แบบ private บนแพ็กเกจ GitHub Free ได้ Actions 2,000 นาทีต่อเดือน
+workflow สองตัวรันสคริปต์ตัวเดียวกันบน runner ของ GitHub จึงไม่ต้องเปิดคอมค้างไว้: `.github/workflows/migrate.yml` (**Migrate queue**: PDF -> Gemini -> DB) และ `.github/workflows/extract.yml` (**Extract queue**: สร้าง/รวมคิวจากชีตเก่า คือ `--extract`) repo แบบ private บนแพ็กเกจ GitHub Free ได้ Actions 2,000 นาทีต่อเดือน
 
 ตั้งค่าครั้งเดียว:
 
-1. สร้าง repo แล้ว push โฟลเดอร์นี้ขึ้นไป แนะนำแบบ **private**: workflow แสดงแค่ตัวเลขสรุป แต่ถ้า repo เป็น public ใครก็เปิดดู log และสรุปผลการรันได้
-2. เพิ่ม repository secrets 3 ตัว (Settings > Secrets and variables > Actions) หรือใช้ GitHub CLI ใน PowerShell:
+1. สร้าง repo แล้ว push โฟลเดอร์นี้ขึ้นไป แนะนำแบบ **private**: workflow แสดงแค่ตัวเลขสรุป (`--public-log`) แต่ถ้า repo เป็น public ใครก็เปิดดู log และสรุปผลการรันได้
+2. เพิ่ม repository secrets 2 ตัวและ variable 1 ตัว (Settings > Secrets and variables > Actions ID สเปรดชีตเป็นแค่ค่าตั้ง จึงใส่ในแท็บ **Variables**) หรือใช้ GitHub CLI ใน PowerShell:
 
 ```powershell
 Get-Content C:\path\to\secrets\sa-key.json -Raw | gh secret set SA_KEY_JSON   # เนื้อหาไฟล์คีย์ทั้งไฟล์
 gh secret set GEMINI_API_KEY                                                    # จะถามค่า
-gh secret set PMIS_SPREADSHEET_ID                                               # จะถามค่า
+gh variable set PMIS_SPREADSHEET_ID --body "<ID สเปรดชีต>"                        # เป็น variable ไม่ใช่ secret (secret ชื่อเดียวกันยังใช้เป็นตัวสำรองได้)
 ```
 
 3. เตรียมเหมือนรันในเครื่อง: ปิด trigger ของ Apps Script และแชร์ชีตกับ PDF ให้อีเมล service account
+4. เฉพาะ **Extract queue** ให้เพิ่มค่าตั้งของชีตเก่าเป็น **variables** ของ repo (Settings > Secrets and variables > Actions > Variables เป็นแค่ค่าตั้ง ไม่ใช่ความลับ และไม่ต้องใช้ `GEMINI_API_KEY`): `PMIS_LEGACY_DWR_SHEET`, `PMIS_LEGACY_DRQ_SHEET` (ชื่อแท็บเป๊ะๆ) และถ้าต้องการ `PMIS_LEGACY_SPREADSHEET_ID` (ไฟล์ที่เก็บแท็บเหล่านั้น ถ้าไม่ใช่สเปรดชีตเป้าหมาย แชร์ให้ service account ด้วย) ถ้าใช้ GitHub CLI: `gh variable set PMIS_LEGACY_DWR_SHEET --body "<ชื่อแท็บ>"` secret ชื่อเดียวกันยังใช้เป็นตัวสำรองได้ และ variable มาก่อน
 
-วิธีรัน: แท็บ Actions > **Migrate queue** > Run workflow แล้วเลือก `mode` เริ่มจาก `dry-run` ตามด้วย `check-access` แล้ว `run` ด้วย `limit` น้อยๆ ก่อนค่อยเพิ่ม ถ้าใช้บรรทัดคำสั่ง: `gh workflow run migrate.yml -f mode=dry-run`
+วิธี migrate: แท็บ Actions > **Migrate queue** > Run workflow แล้วเลือก `mode` เริ่มจาก `dry-run` ตามด้วย `check-access` แล้ว `run` ด้วย `limit` น้อยๆ ก่อนค่อยเพิ่ม ถ้าใช้บรรทัดคำสั่ง: `gh workflow run migrate.yml -f mode=dry-run`
 
-- unit test (job `test`) จะรันก่อน ผ่านแล้วการ migrate ถึงจะเริ่ม
-- ไม่มีสองรอบรันซ้อนกัน (`concurrency`) จึงไม่ทำแถว `Waiting` เดียวกันซ้ำ
+วิธีสร้างคิว: แท็บ Actions > **Extract queue** > Run workflow ด้วย `mode = dry-run` (อ่านแท็บชีตเก่า ไม่เขียนอะไร) แล้วค่อย `mode = extract` ช่อง `queue` เลือก DWR / DRQ / ทั้งสอง, `legacy_spreadsheet` ชี้ไปไฟล์อื่น, `overwrite` สร้างใหม่ทั้งคิวแทนการ merge (รันตามเวลาอย่าเปิดตัวนี้) ถ้าใช้บรรทัดคำสั่ง: `gh workflow run extract.yml -f mode=dry-run`
+
+- unit test (job `test`) จะรันก่อน ผ่านแล้ว migrate / extract ถึงจะเริ่ม
+- ไม่มีสองรอบรันซ้อนกัน แม้แต่ migrate กับ extract (ใช้ `concurrency` กลุ่มเดียวกัน) จึงไม่ทำแถว `Waiting` เดียวกันซ้ำ
 - คีย์ service account ถูกเขียนเป็นไฟล์ชั่วคราวเฉพาะช่วงที่รัน
-- ผลลัพธ์เต็ม (fileId, ชื่อชีต, error รายแถวที่มีข้อความจาก PDF) เขียนลงไฟล์ชั่วคราวบน runner เท่านั้น ส่วน log และสรุปผลการรันแสดงแค่ตัวเลข (สถานะคิว, ยอด Done/Error, สาเหตุที่หยุด) โดยซ่อน ID สเปรดชีตและอีเมล service account รายละเอียดรายแถวดูได้ที่คอลัมน์ G ของชีตคิว ถ้าต้องการ log เต็มให้รันในเครื่อง
-- มีโหมดรันอัตโนมัติแต่ปิดไว้: ลบ `#` หน้าบรรทัด `schedule:` ใน workflow (รอบตั้งเวลาใช้ `mode = run`, ทั้งสองคิว, `limit = 30`)
+- workflow เรียกสคริปต์ด้วย `--public-log`: log และสรุปผลการรันแสดงแค่ตัวเลข (สถานะคิว, ยอด Done/Error, สาเหตุที่หยุด) ไม่มีชื่อแท็บ ชื่อ/ID ชีต Doc No file ID หรือรายละเอียด error และซ่อน ID สเปรดชีตกับอีเมล service account อีกชั้น สิ่งที่สคริปต์เขียนลง stderr ไปอยู่ในไฟล์ที่ไม่เคยถูกพิมพ์ รายละเอียดรายแถวดูได้ที่คอลัมน์ G ของชีตคิว ถ้าต้องการ log เต็มให้รันในเครื่อง (ไม่ใส่ `--public-log`)
+- workflow ไม่มี `schedule:` (cron ของ GitHub เองไม่เริ่มรันให้) ถ้าจะรันอัตโนมัติ ให้เรียก workflow_dispatch API จากตัวตั้งเวลาภายนอก เช่น cron-job.org: `POST https://api.github.com/repos/<owner>/<repo>/actions/workflows/migrate.yml/dispatches` (หรือ `extract.yml`) ด้วย body `{"ref":"main","inputs":{"mode":"run","limit":"30"}}` (หรือ `{"ref":"main","inputs":{"mode":"extract"}}`) และ token แบบ fine-grained สิทธิ์ **Actions: Read and write**
+- ส่วนที่ใช้ร่วมกันอยู่ใน `.github/scripts/` (`with_credentials.sh` เขียนคีย์เป็นไฟล์ชั่วคราวแล้วลบทิ้ง, `job_summary.sh`) และ `.github/actions/setup-python-deps/`
 
 ## พฤติกรรมที่ควรรู้
 
@@ -157,12 +161,14 @@ gh secret set PMIS_SPREADSHEET_ID                                               
 migrate_queue.py        entry point (python migrate_queue.py ...)
 migrator/
   cli.py                options, building the clients, main()
+  public_log.py         --public-log: only the lines that are safe in a public log
   settings.py           settings from the environment / .env
   runner.py             choosing the rows + the main loop
   processing.py         one row: Drive PDF -> Gemini -> DB row
   sheets.py drive.py gemini.py     the three APIs
   reports.py            parsing Gemini's JSON, building the DB rows
   extract.py            --extract (legacy_sheet.py reads, queue_writer.py writes / merges)
+  stamps.py             the refresh time (I1:I2) and the migration time (K1:K2) in the queue sheet
   specs.py config.py models.py utils.py clock.py
 tests/                  one test file per module + fakes.py / legacy_fakes.py
 ```

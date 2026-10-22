@@ -1,0 +1,141 @@
+# Build the MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ queues from the legacy sheets (--extract).
+# Running the migration itself (PDF -> Gemini -> DB) is a separate workflow: migrate.yml
+#
+# Required repository secret (Settings > Secrets and variables > Actions > Secrets):
+#   SA_KEY_JSON                 the whole contents of the service-account key file (.json)
+# GEMINI_API_KEY is not needed.
+#
+# Repository VARIABLES (the same page, Variables tab; plain settings, not credentials, so they are variables, not secrets).
+# A secret with the same name still works as a fallback, and a variable wins over it:
+#   PMIS_SPREADSHEET_ID         ID of the target spreadsheet (the queues are always written here)
+#   PMIS_LEGACY_DWR_SHEET       exact name of the legacy tab the DWR queue is built from
+#   PMIS_LEGACY_DRQ_SHEET       exact name of the legacy tab the DRQ queue is built from
+#   PMIS_LEGACY_SPREADSHEET_ID  (optional) ID or URL of the spreadsheet file that holds the legacy tabs.
+#                               Empty = the same file as PMIS_SPREADSHEET_ID. The run input legacy_spreadsheet wins over it.
+#                               Share that file with the service account (Viewer is enough).
+# Variables are not masked in the log, so the script never prints them (--public-log), and the legacy file's ID / URL is masked explicitly.
+#
+# Start with mode = dry-run (reads the legacy tabs, writes nothing), then run with mode = extract.
+# A queue that already has rows is MERGED (statuses kept, new items appended); overwrite rebuilds it from scratch.
+# The log shows counts only (--public-log); run the script locally to see the names and Doc Nos.
+name: Extract queue
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run = read the legacy tabs and show the plan, write nothing | extract = build / merge the queues"
+        type: choice
+        options: [dry-run, extract]
+        default: dry-run
+      queue:
+        description: "Which queue: both = DWR then DRQ"
+        type: choice
+        options: [both, dwr, drq]
+        default: both
+      legacy_spreadsheet:
+        description: "ID or URL of the spreadsheet that holds the legacy tabs (empty = variable PMIS_LEGACY_SPREADSHEET_ID, or the target file). Inputs are visible on the run page"
+        type: string
+        default: ""
+      overwrite:
+        description: "Rebuild the queue from scratch instead of merging (clears it: every row becomes Waiting and every Done/Error status is wiped). Normally leave this off"
+        type: boolean
+        default: false
+
+# Same group as migrate.yml: an extract and a migration never run at the same time
+concurrency:
+  group: migrate-queue
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-python-deps
+        with:
+          extra-packages: pytest
+      - run: python -m pytest -q
+
+  extract:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-python-deps
+
+      - name: Extract
+        shell: bash
+        env:
+          # Inputs go through environment variables (never pasted into the script text)
+          IN_MODE: ${{ inputs.mode || 'dry-run' }}
+          IN_QUEUE: ${{ inputs.queue || 'both' }}
+          IN_LEGACY_SPREADSHEET: ${{ inputs.legacy_spreadsheet || '' }}
+          IN_OVERWRITE: ${{ inputs.overwrite || false }}
+          SA_KEY_JSON: ${{ secrets.SA_KEY_JSON }}
+          # variable first, then the secret of the same name (the old way) as a fallback
+          PMIS_SPREADSHEET_ID: ${{ vars.PMIS_SPREADSHEET_ID || secrets.PMIS_SPREADSHEET_ID }}
+          # variables first, then the secret of the same name (the old way) as a fallback
+          PMIS_LEGACY_DWR_SHEET: ${{ vars.PMIS_LEGACY_DWR_SHEET || secrets.PMIS_LEGACY_DWR_SHEET }}
+          PMIS_LEGACY_DRQ_SHEET: ${{ vars.PMIS_LEGACY_DRQ_SHEET || secrets.PMIS_LEGACY_DRQ_SHEET }}
+          PMIS_LEGACY_SPREADSHEET_ID: ${{ vars.PMIS_LEGACY_SPREADSHEET_ID || secrets.PMIS_LEGACY_SPREADSHEET_ID }}
+        run: |
+          set -euo pipefail
+          die() { echo "::error::$*"; exit 1; }
+
+          [[ -n "$PMIS_SPREADSHEET_ID" ]] || die "Variable PMIS_SPREADSHEET_ID is missing or empty"
+          # a variable is not masked by GitHub like a secret is, so mask the ID explicitly (the script never prints it anyway: --public-log)
+          echo "::add-mask::$PMIS_SPREADSHEET_ID"
+
+          args=(--extract --public-log)
+          case "$IN_MODE" in
+            dry-run) args+=(--dry-run) ;;
+            extract) ;;
+            *) die "Unknown mode: $IN_MODE" ;;
+          esac
+          case "$IN_QUEUE" in
+            both) ;;
+            dwr|drq) args+=(--queue "$IN_QUEUE") ;;
+            *) die "Unknown queue: $IN_QUEUE" ;;
+          esac
+
+          # The legacy tab name of each queue that is built is required
+          if [[ "$IN_QUEUE" != drq && -z "$PMIS_LEGACY_DWR_SHEET" ]]; then die "Variable PMIS_LEGACY_DWR_SHEET is missing or empty (needed to build the DWR queue)"; fi
+          if [[ "$IN_QUEUE" != dwr && -z "$PMIS_LEGACY_DRQ_SHEET" ]]; then die "Variable PMIS_LEGACY_DRQ_SHEET is missing or empty (needed to build the DRQ queue)"; fi
+          [[ "$IN_OVERWRITE" != "true" ]] || args+=(--overwrite)
+
+          # The legacy file may be given as an ID or a URL; hide both forms from the log (the Running: line below prints the arguments)
+          for legacy_value in "$IN_LEGACY_SPREADSHEET" "$PMIS_LEGACY_SPREADSHEET_ID"; do
+            [[ -n "$legacy_value" ]] || continue
+            echo "::add-mask::$legacy_value"
+            legacy_id=$(printf '%s' "$legacy_value" | sed -nE 's#.*/d/([A-Za-z0-9_-]+).*#\1#p')
+            if [[ -n "$legacy_id" ]]; then echo "::add-mask::$legacy_id"; fi
+          done
+          if [[ -n "$IN_LEGACY_SPREADSHEET" ]]; then args+=(--legacy-spreadsheet "$IN_LEGACY_SPREADSHEET"); fi
+
+          # --public-log prints counts only. Anything the script writes to stderr (tracebacks, setup errors) goes to a file
+          # that is never printed: the repository may be public, and the details can contain tab names and IDs.
+          echo "Running: python migrate_queue.py ${args[*]}"
+          set +e
+          bash .github/scripts/with_credentials.sh python migrate_queue.py "${args[@]}" 2> "$RUNNER_TEMP/stderr.log" | tee >(grep -v '^::' > "$RUNNER_TEMP/counts.log")
+          status=${PIPESTATUS[0]}
+          set -e
+          if [[ $status -ne 0 ]]; then
+            echo "::error::migrate_queue.py exited with code $status (2 = a queue could not be built, or it was left untouched because its header row is not the expected one - fix it or use overwrite). Run the script locally for the full log."
+          fi
+          exit "$status"
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        env:
+          PMIS_SPREADSHEET_ID: ${{ vars.PMIS_SPREADSHEET_ID || secrets.PMIS_SPREADSHEET_ID }}
+        run: bash .github/scripts/job_summary.sh "Extract run" "$RUNNER_TEMP/counts.log"

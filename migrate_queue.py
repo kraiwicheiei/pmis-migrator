@@ -82,12 +82,14 @@ Apps Script(extractDriveFileForAI)와 동일하게 맞춘 점 / [TH] ส่ว�
   [TH] ไฟล์นี้เป็นแค่จุดเริ่มต้น โค้ดอยู่ในแพ็กเกจ migrator/
   [EN] This file is only the entry point; the code lives in the migrator/ package:
     cli.py          options, building the clients, main()
+    public_log.py   --public-log: only the lines that are safe in a public Actions log
     settings.py     settings read from the environment / .env
     runner.py       choosing the rows and the main loop (--dry-run / --check-access / a real run)
     processing.py   one row: Drive PDF -> Gemini -> DB row
     sheets.py / drive.py / gemini.py   the three APIs
     reports.py      parsing Gemini's JSON answers, building the DB rows
     extract.py      --extract (legacy_sheet.py reads the legacy sheet, queue_writer.py writes / merges the queue)
+    stamps.py       the refresh time (I1:I2) and the migration time (K1:K2) written to the queue sheet
     specs.py / config.py / models.py / utils.py / clock.py   queue definitions, constants, data structures, helpers, time
   테스트는 tests/ / [TH] เทสต์อยู่ใน tests/ / [EN] Tests are in tests/:  python -m pytest -q
 """

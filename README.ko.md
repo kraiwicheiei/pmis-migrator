@@ -106,28 +106,32 @@ PDF 가 `--max-mb` 보다 큰 행은 표지 이미지만 전송한다는 `ℹ` �
 
 ## GitHub Actions 에서 실행
 
-`.github/workflows/migrate.yml` 은 같은 스크립트를 GitHub 호스팅 러너에서 실행하므로 PC 를 켜 둘 필요가 없습니다. GitHub Free 플랜의 private 저장소는 매달 Actions 2,000분을 받습니다.
+workflow 두 개가 같은 스크립트를 GitHub 호스팅 러너에서 실행하므로 PC 를 켜 둘 필요가 없습니다: `.github/workflows/migrate.yml` (**Migrate queue**: PDF -> Gemini -> DB) 과 `.github/workflows/extract.yml` (**Extract queue**: 옛 시트에서 큐 만들기/합치기, `--extract`). GitHub Free 플랜의 private 저장소는 매달 Actions 2,000분을 받습니다.
 
 최초 1회 설정:
 
-1. 저장소를 만들고 이 폴더를 push 합니다. **private** 을 권장합니다: workflow 는 집계 숫자만 출력하지만, public 저장소에서는 누구나 실행 로그와 실행 요약을 볼 수 있습니다.
-2. 저장소 시크릿 3개를 추가합니다 (Settings > Secrets and variables > Actions). PowerShell 에서 GitHub CLI 로도 가능합니다:
+1. 저장소를 만들고 이 폴더를 push 합니다. **private** 을 권장합니다: workflow 는 집계 숫자만 출력(`--public-log`)하지만, public 저장소에서는 누구나 실행 로그와 실행 요약을 볼 수 있습니다.
+2. 저장소 시크릿 2개와 변수 1개를 추가합니다 (Settings > Secrets and variables > Actions. 스프레드시트 ID 는 일반 설정이므로 **Variables** 탭에 넣습니다). PowerShell 에서 GitHub CLI 로도 가능합니다:
 
 ```powershell
 Get-Content C:\path\to\secrets\sa-key.json -Raw | gh secret set SA_KEY_JSON   # 키 파일 전체
 gh secret set GEMINI_API_KEY                                                    # 값을 물어봅니다
-gh secret set PMIS_SPREADSHEET_ID                                               # 값을 물어봅니다
+gh variable set PMIS_SPREADSHEET_ID --body "<스프레드시트 ID>"                    # 시크릿이 아닌 변수 (같은 이름의 시크릿도 예비로 동작)
 ```
 
 3. 로컬 실행과 같은 준비를 합니다: Apps Script 트리거를 끄고, 시트와 PDF 를 서비스 계정 이메일에 공유합니다.
+4. **Extract queue** 에만 필요한 옛 시트 설정을 저장소 **변수(variables)** 로 추가합니다(Settings > Secrets and variables > Actions > Variables. 자격 증명이 아닌 일반 설정이며 `GEMINI_API_KEY` 는 필요 없음): `PMIS_LEGACY_DWR_SHEET`, `PMIS_LEGACY_DRQ_SHEET`(정확한 탭 이름), 그리고 선택으로 `PMIS_LEGACY_SPREADSHEET_ID`(그 탭이 들어 있는 파일이 대상 스프레드시트가 아닐 때, 서비스 계정과 공유). GitHub CLI 로는 `gh variable set PMIS_LEGACY_DWR_SHEET --body "<탭 이름>"`. 같은 이름의 시크릿도 예비로 계속 동작하며 변수가 우선합니다.
 
-실행: Actions 탭 > **Migrate queue** > Run workflow 에서 `mode` 를 고릅니다. 먼저 `dry-run`, 다음 `check-access`, 그다음 작은 `limit` 으로 `run`, 이어서 더 크게. 명령줄에서는 `gh workflow run migrate.yml -f mode=dry-run`.
+마이그레이션: Actions 탭 > **Migrate queue** > Run workflow 에서 `mode` 를 고릅니다. 먼저 `dry-run`, 다음 `check-access`, 그다음 작은 `limit` 으로 `run`, 이어서 더 크게. 명령줄에서는 `gh workflow run migrate.yml -f mode=dry-run`.
 
-- 단위 테스트(`test` 잡)가 먼저 실행되며, 통과해야 마이그레이션이 시작됩니다.
-- 두 실행이 겹치지 않으므로(`concurrency`) 같은 `Waiting` 행이 두 번 처리되지 않습니다.
+큐 만들기: Actions 탭 > **Extract queue** > Run workflow 에서 먼저 `mode = dry-run`(옛 탭을 읽고 아무것도 쓰지 않음), 그다음 `mode = extract`. `queue` 는 DWR / DRQ / 둘 다, `legacy_spreadsheet` 는 다른 파일 지정, `overwrite` 는 합치지 않고 처음부터 다시 만듭니다(예약 실행에서는 끄세요). 명령줄에서는 `gh workflow run extract.yml -f mode=dry-run`.
+
+- 단위 테스트(`test` 잡)가 먼저 실행되며, 통과해야 마이그레이션 / extract 가 시작됩니다.
+- 두 실행이 겹치지 않으며(마이그레이션과 extract 도 같은 `concurrency` 그룹) 같은 `Waiting` 행이 두 번 처리되지 않습니다.
 - 서비스 계정 키는 실행 중에만 임시 파일로 존재합니다.
-- 전체 출력(file ID, 시트 이름, PDF 내용이 인용된 행별 오류)은 러너의 임시 파일에만 기록되고, 로그와 실행 요약에는 집계(큐 상태, Done/Error 합계, 중단 사유)만 나오며 스프레드시트 ID 와 서비스 계정 이메일은 가려집니다. 행별 상세는 큐 시트의 G열에 있고, 전체 로그가 필요하면 로컬에서 실행하세요.
-- 자동 실행은 가능하지만 꺼져 있습니다: workflow 의 `schedule:` 줄 앞의 `#` 을 지우세요 (예약 실행은 `mode = run`, 두 큐 모두, `limit = 30`).
+- workflow 는 스크립트를 `--public-log` 로 호출합니다: 로그와 실행 요약에는 집계(큐 상태, Done/Error 합계, 중단 사유)만 나오고 탭 이름, 시트 이름/ID, Doc No, file ID, 오류 상세는 나오지 않으며 스프레드시트 ID 와 서비스 계정 이메일도 한 번 더 가려집니다. 스크립트가 stderr 로 쓰는 내용은 출력되지 않는 파일로 갑니다. 행별 상세는 큐 시트의 G열에 있고, 전체 로그가 필요하면 로컬에서(`--public-log` 없이) 실행하세요.
+- workflow 에는 `schedule:` 이 없습니다(GitHub 자체 cron 이 실행을 시작해 주지 않았음). 자동으로 돌리려면 cron-job.org 같은 외부 스케줄러에서 workflow_dispatch API 를 호출하세요: `POST https://api.github.com/repos/<owner>/<repo>/actions/workflows/migrate.yml/dispatches`(또는 `extract.yml`), body 는 `{"ref":"main","inputs":{"mode":"run","limit":"30"}}`(또는 `{"ref":"main","inputs":{"mode":"extract"}}`), 토큰은 **Actions: Read and write** 권한의 fine-grained 토큰.
+- 공용 부분은 `.github/scripts/`(`with_credentials.sh` 는 키를 임시 파일에 쓰고 끝나면 삭제, `job_summary.sh`)와 `.github/actions/setup-python-deps/` 에 있습니다.
 
 ## 알아둘 점
 
@@ -157,12 +161,14 @@ gh secret set PMIS_SPREADSHEET_ID                                               
 migrate_queue.py        entry point (python migrate_queue.py ...)
 migrator/
   cli.py                options, building the clients, main()
+  public_log.py         --public-log: only the lines that are safe in a public log
   settings.py           settings from the environment / .env
   runner.py             choosing the rows + the main loop
   processing.py         one row: Drive PDF -> Gemini -> DB row
   sheets.py drive.py gemini.py     the three APIs
   reports.py            parsing Gemini's JSON, building the DB rows
   extract.py            --extract (legacy_sheet.py reads, queue_writer.py writes / merges)
+  stamps.py             the refresh time (I1:I2) and the migration time (K1:K2) in the queue sheet
   specs.py config.py models.py utils.py clock.py
 tests/                  one test file per module + fakes.py / legacy_fakes.py
 ```

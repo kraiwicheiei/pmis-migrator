@@ -106,28 +106,32 @@ Rows whose PDF is larger than `--max-mb` are listed with an `ℹ` line saying th
 
 ## Run on GitHub Actions
 
-`.github/workflows/migrate.yml` runs the same script on a GitHub-hosted runner, so no PC has to stay on. Private repositories on the GitHub Free plan get 2,000 Actions minutes per month.
+Two workflows run the same script on a GitHub-hosted runner, so no PC has to stay on: `.github/workflows/migrate.yml` (**Migrate queue**: PDF -> Gemini -> DB) and `.github/workflows/extract.yml` (**Extract queue**: build / merge the queues from the legacy sheets, `--extract`). Private repositories on the GitHub Free plan get 2,000 Actions minutes per month.
 
 One-time setup:
 
-1. Create a repository and push this folder to it. **Private** is recommended: the workflow prints only counts, but in a public repository anyone can read the run logs and the run summary.
-2. Add three repository secrets (Settings > Secrets and variables > Actions), or with the GitHub CLI in PowerShell:
+1. Create a repository and push this folder to it. **Private** is recommended: the workflows print only counts (`--public-log`), but in a public repository anyone can read the run logs and the run summary.
+2. Add two repository secrets and one variable (Settings > Secrets and variables > Actions; the spreadsheet ID is a plain setting, so it goes in the **Variables** tab), or with the GitHub CLI in PowerShell:
 
 ```powershell
 Get-Content C:\path\to\secrets\sa-key.json -Raw | gh secret set SA_KEY_JSON   # the whole key file
 gh secret set GEMINI_API_KEY                                                    # prompts for the value
-gh secret set PMIS_SPREADSHEET_ID                                               # prompts for the value
+gh variable set PMIS_SPREADSHEET_ID --body "<spreadsheet ID>"                    # a variable, not a secret (a secret with the same name still works as a fallback)
 ```
 
 3. Do the same preparation as for a local run: disable the Apps Script triggers, and share the sheet and the PDFs with the service-account e-mail.
+4. For **Extract queue** only, add the legacy settings as repository **variables** (Settings > Secrets and variables > Actions > Variables; they are plain settings, not credentials; `GEMINI_API_KEY` is not needed there): `PMIS_LEGACY_DWR_SHEET`, `PMIS_LEGACY_DRQ_SHEET` (the exact tab names), and optionally `PMIS_LEGACY_SPREADSHEET_ID` (the file that holds them, if it is not the target spreadsheet; share it with the service account). With the GitHub CLI: `gh variable set PMIS_LEGACY_DWR_SHEET --body "<tab name>"`. A secret with the same name still works as a fallback, and the variable wins over it.
 
-To run: Actions tab > **Migrate queue** > Run workflow, then choose `mode`: `dry-run` first, then `check-access`, then `run` with a small `limit`, then a larger one. The same from the command line: `gh workflow run migrate.yml -f mode=dry-run`.
+To migrate: Actions tab > **Migrate queue** > Run workflow, then choose `mode`: `dry-run` first, then `check-access`, then `run` with a small `limit`, then a larger one. The same from the command line: `gh workflow run migrate.yml -f mode=dry-run`.
 
-- The unit tests run first (`test` job); the migration only starts if they pass.
-- Two runs never overlap (`concurrency`), so the same `Waiting` rows cannot be processed twice.
+To build the queues: Actions tab > **Extract queue** > Run workflow with `mode = dry-run` (reads the legacy tabs and writes nothing), then `mode = extract`. `queue` picks DWR / DRQ / both; `legacy_spreadsheet` points at another file; `overwrite` rebuilds from scratch instead of merging (leave it off for a scheduled run). The same from the command line: `gh workflow run extract.yml -f mode=dry-run`.
+
+- The unit tests run first (`test` job); the migration / extract only starts if they pass.
+- Two runs never overlap, not even a migration and an extract (they share one `concurrency` group), so the same `Waiting` rows cannot be processed twice.
 - The service-account key is written to a temporary file for the duration of the run only.
-- The full output (file IDs, the sheet name, row errors that quote text from the PDFs) goes only to a temporary file on the runner. The log and the run summary show just the counts (queue statuses, Done/Error totals, why a run stopped), with the spreadsheet ID and the service-account e-mail masked. The per-row details are in column G of the queue sheet; run the script locally to see the full log.
-- Automatic runs are available but off: remove the `#` in front of the `schedule:` lines in the workflow (a scheduled run uses `mode = run`, both queues, `limit = 30`).
+- The workflows call the script with `--public-log`: the log and the run summary show just the counts (queue statuses, Done/Error totals, why a run stopped), never tab names, sheet names / IDs, Doc Nos, file IDs or error details, and the spreadsheet ID and the service-account e-mail are masked as well. Anything the script writes to stderr goes to a file that is never printed. The per-row details are in column G of the queue sheet; run the script locally (without `--public-log`) to see the full log.
+- There is no `schedule:` in the workflows (GitHub's own cron was not starting runs). To run them automatically, call the workflow_dispatch API from an outside scheduler such as cron-job.org: `POST https://api.github.com/repos/<owner>/<repo>/actions/workflows/migrate.yml/dispatches` (or `extract.yml`) with the body `{"ref":"main","inputs":{"mode":"run","limit":"30"}}` (or `{"ref":"main","inputs":{"mode":"extract"}}`) and a fine-grained token with the **Actions: Read and write** permission.
+- The shared pieces live in `.github/scripts/` (`with_credentials.sh` writes the key to a temporary file and deletes it afterwards, `job_summary.sh`) and `.github/actions/setup-python-deps/`.
 
 ## Good to know
 
@@ -157,12 +161,14 @@ The code is split by job; `migrate_queue.py` is only the entry point, so every c
 migrate_queue.py        entry point (python migrate_queue.py ...)
 migrator/
   cli.py                options, building the clients, main()
+  public_log.py         --public-log: only the lines that are safe in a public log
   settings.py           settings from the environment / .env
   runner.py             choosing the rows + the main loop
   processing.py         one row: Drive PDF -> Gemini -> DB row
   sheets.py drive.py gemini.py     the three APIs
   reports.py            parsing Gemini's JSON, building the DB rows
   extract.py            --extract (legacy_sheet.py reads, queue_writer.py writes / merges)
+  stamps.py             the refresh time (I1:I2) and the migration time (K1:K2) in the queue sheet
   specs.py config.py models.py utils.py clock.py
 tests/                  one test file per module + fakes.py / legacy_fakes.py
 ```

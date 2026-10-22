@@ -1,0 +1,21 @@
+# Python + the dependencies of this project (the caller checks the repository out first).
+name: Set up Python and the dependencies
+description: Installs Python 3.12 with the pip cache and requirements.txt (plus any extra packages)
+
+inputs:
+  extra-packages:
+    description: "Extra pip packages, e.g. pytest"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+    - shell: bash
+      env:
+        EXTRA_PACKAGES: ${{ inputs.extra-packages }}
+      run: pip install -r requirements.txt $EXTRA_PACKAGES

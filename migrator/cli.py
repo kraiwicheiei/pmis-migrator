@@ -13,6 +13,7 @@ from typing import Optional
 from .config import DEFAULT_API_VERSION, DEFAULT_MODEL, LARGE_PDF_MB, SCOPES
 from .extract import run_extract
 from .models import Clients
+from .public_log import make_log
 from .runner import queues_to_run, run_queues
 from .settings import load_env_file, require_legacy_sheet_names, require_spreadsheet_id, resolve_legacy_spreadsheet_id
 from .sheets import spreadsheet_title
@@ -51,6 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--legacy-spreadsheet", default=None, metavar="ID_OR_URL",
                    help="with --extract: the spreadsheet file (ID or URL) that holds the legacy tabs; the queues are still written to PMIS_SPREADSHEET_ID. "
                         "Default: PMIS_LEGACY_SPREADSHEET_ID, or the same file as PMIS_SPREADSHEET_ID. Share it with the service account")
+    p.add_argument("--public-log", action="store_true",
+                   help="print only counts and statuses (no tab names, sheet names / IDs, Doc Nos or error details), so the output is safe in the Actions log of a public repository; run without it locally for the details")
     p.add_argument("--overwrite", action="store_true",
                    help="with --extract: rebuild the whole queue from scratch instead of merging (clears it, every row becomes Waiting and every Done/Error status is wiped - what the Apps Script always did)")
     return p
@@ -112,11 +115,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         sheet_label = f"{title} ({args.spreadsheet_id})"
     else:
         sheet_label = f"{args.spreadsheet_id} (could not read the sheet name - check the ID and that the sheet is shared with the service account: {title_error})"
+    log = make_log(args.public_log)
     if args.extract:
-        print(f"service account: {clients.sa_email} | sheet: {sheet_label} | mode: build the queues from the legacy sheets (--extract)")
-        return run_extract(args, clients, keys, sheet_title=title)
-    print(f"service account: {clients.sa_email} | sheet: {sheet_label} | model: {clients.model}")
-    return run_queues(args, clients, keys, sheet_title=title)
+        log(f"service account: {clients.sa_email} | sheet: {sheet_label} | mode: build the queues from the legacy sheets (--extract)")
+        return run_extract(args, clients, keys, log=log, sheet_title=title)
+    log(f"service account: {clients.sa_email} | sheet: {sheet_label} | model: {clients.model}")
+    return run_queues(args, clients, keys, log=log, sheet_title=title)
 
 
 def entry() -> None:
