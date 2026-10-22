@@ -1,0 +1,174 @@
+# Run the MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ migration on GitHub-hosted runners.
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   SA_KEY_JSON          the whole contents of the service-account key file (.json)
+#   GEMINI_API_KEY       Gemini API key (only needed when mode = run)
+#   PMIS_SPREADSHEET_ID  ID of the target spreadsheet
+#
+# Start with mode = dry-run, then check-access, then run with a small limit.
+name: Migrate queue
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run = list rows only | check-access = check Drive access only | run = migrate for real"
+        type: choice
+        options: [dry-run, check-access, run]
+        default: dry-run
+      queue:
+        description: "Which queue: both = DWR then DRQ"
+        type: choice
+        options: [both, dwr, drq]
+        default: both
+      limit:
+        description: "Max rows per queue (0 = no limit)"
+        type: string
+        default: "30"
+      only_rows:
+        description: "Only these sheet rows, e.g. 83,102,127-128 (needs queue = dwr or drq)"
+        type: string
+        default: ""
+      accept_first_report:
+        description: "If the AI returns several reports and none matches the Doc No, use the first one"
+        type: boolean
+        default: false
+      max_output_tokens:
+        description: "Gemini maxOutputTokens, e.g. 16000 (empty = not set). Use when the cell says finishReason=MAX_TOKENS"
+        type: string
+        default: ""
+
+  # TEMPORARY TEST: run automatically every 5 minutes (the shortest interval GitHub allows).
+  # GitHub cron is UTC and may start late or skip a run. A scheduled run uses mode=dry-run, queue=both, limit=30
+  # (it only lists rows: no PDF download, no Gemini call, nothing written to the sheet).
+  # Normal use: e.g. cron "17 1 * * 1-5" = 08:17 Bangkok time, Monday to Friday, with the mode default below set back to 'run'.
+  # To stop: put '#' back in front of the 2 lines below, or use Actions > Migrate queue > ... > Disable workflow.
+  schedule:
+    - cron: "*/5 * * * *"
+
+# Never run two migrations at the same time (both would pick the same Waiting rows)
+concurrency:
+  group: migrate-queue
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q
+
+  migrate:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Migrate
+        shell: bash
+        env:
+          # Inputs go through environment variables (never pasted into the script text)
+          IN_MODE: ${{ inputs.mode || 'dry-run' }}
+          IN_QUEUE: ${{ inputs.queue || 'both' }}
+          IN_LIMIT: ${{ inputs.limit || '30' }}
+          IN_ONLY_ROWS: ${{ inputs.only_rows || '' }}
+          IN_ACCEPT_FIRST: ${{ inputs.accept_first_report || false }}
+          IN_MAX_TOKENS: ${{ inputs.max_output_tokens || '' }}
+          SA_KEY_JSON: ${{ secrets.SA_KEY_JSON }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PMIS_SPREADSHEET_ID: ${{ secrets.PMIS_SPREADSHEET_ID }}
+        run: |
+          set -euo pipefail
+          die() { echo "::error::$*"; exit 1; }
+
+          [[ -n "$SA_KEY_JSON" ]] || die "Secret SA_KEY_JSON is missing or empty"
+          [[ -n "$PMIS_SPREADSHEET_ID" ]] || die "Secret PMIS_SPREADSHEET_ID is missing or empty"
+
+          args=()
+          case "$IN_MODE" in
+            dry-run) args+=(--dry-run) ;;
+            check-access) args+=(--check-access) ;;
+            run) [[ -n "$GEMINI_API_KEY" ]] || die "Secret GEMINI_API_KEY is missing or empty (needed for mode = run)" ;;
+            *) die "Unknown mode: $IN_MODE" ;;
+          esac
+          case "$IN_QUEUE" in
+            both) ;;
+            dwr|drq) args+=(--queue "$IN_QUEUE") ;;
+            *) die "Unknown queue: $IN_QUEUE" ;;
+          esac
+          [[ "$IN_LIMIT" =~ ^[0-9]+$ ]] || die "limit must be a whole number"
+          args+=(--limit "$IN_LIMIT")
+          if [[ -n "$IN_ONLY_ROWS" ]]; then
+            [[ "$IN_ONLY_ROWS" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || die "only_rows must look like 83,102,127-128"
+            [[ "$IN_QUEUE" != both ]] || die "only_rows needs queue = dwr or drq (row numbers belong to one queue sheet)"
+            args+=(--only-rows "$IN_ONLY_ROWS")
+          fi
+          if [[ -n "$IN_MAX_TOKENS" ]]; then
+            [[ "$IN_MAX_TOKENS" =~ ^[0-9]+$ ]] || die "max_output_tokens must be a whole number"
+            args+=(--max-output-tokens "$IN_MAX_TOKENS")
+          fi
+          if [[ "$IN_ACCEPT_FIRST" == "true" ]]; then
+            args+=(--accept-first-report)
+          fi
+
+          # The service-account key only exists as a temporary file readable by this user, and is removed at the end
+          umask 077
+          key_file="$RUNNER_TEMP/sa-key.json"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$SA_KEY_JSON" > "$key_file"
+          python -c 'import json,sys; json.load(open(sys.argv[1]))' "$key_file" 2>/dev/null || die "Secret SA_KEY_JSON is not valid JSON (paste the whole key file)"
+          # Also hide the service-account e-mail and project ID, should anything print them
+          for key_field in client_email project_id; do
+            value=$(python -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]) or "")' "$key_file" "$key_field")
+            if [[ -n "$value" ]]; then echo "::add-mask::$value"; fi
+          done
+          export GOOGLE_APPLICATION_CREDENTIALS="$key_file"
+
+          # Actions logs are readable by anyone when the repository is public, so the full output (file IDs, sheet name,
+          # row errors that quote text from the PDFs) only goes to a temporary file on the runner. The log shows the
+          # counts only; the per-row details are in column G of the queue sheet.
+          safe_lines='^(Queue |Rows to process|Finished:|All queues|Of the Done rows|Stopped early|Gemini calls:|✗ Could not process queue|\[MIGRATION_QUEUE(_DRQ)?\] Reachable|\(dry-run)'
+          echo "Running: python migrate_queue.py ${args[*]}"
+          status=0
+          python migrate_queue.py "${args[@]}" > "$RUNNER_TEMP/run.log" 2>&1 || status=$?
+          grep -E "$safe_lines" "$RUNNER_TEMP/run.log" > "$RUNNER_TEMP/counts.log" || true
+          cat "$RUNNER_TEMP/counts.log"
+          if [[ $status -ne 0 ]]; then
+            echo "::error::migrate_queue.py exited with code $status (2 = stopped early or a queue could not be read). Row details are in column G of the queue sheet; run the script locally for the full log."
+          fi
+          exit "$status"
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        env:
+          PMIS_SPREADSHEET_ID: ${{ secrets.PMIS_SPREADSHEET_ID }}
+        run: |
+          log="$RUNNER_TEMP/counts.log"
+          [[ -f "$log" ]] || exit 0
+          {
+            echo "### Migration run"
+            echo
+            echo '```'
+            # counts only (see the Migrate step); keep the spreadsheet ID out of the summary
+            tail -n 40 "$log" | sed "s/${PMIS_SPREADSHEET_ID:-__none__}/***/g"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
