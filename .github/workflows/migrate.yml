@@ -38,13 +38,8 @@ on:
         type: string
         default: ""
 
-  # TEMPORARY TEST: run automatically every 10 minutes.
-  # GitHub cron is UTC and may start late or skip a run. A scheduled run uses mode=dry-run, queue=both, limit=30
-  # (it only lists rows: no PDF download, no Gemini call, nothing written to the sheet).
-  # Normal use: e.g. cron "17 1 * * 1-5" = 08:17 Bangkok time, Monday to Friday, with the mode default below set back to 'run'.
-  # To stop: put '#' back in front of the 2 lines below, or use Actions > Migrate queue > ... > Disable workflow.
-  schedule:
-    - cron: "*/10 * * * *"
+  # No `schedule:` here: runs are started from outside (cron-job.org calls the workflow_dispatch API),
+  # because GitHub's own cron was not starting runs for this repository.
 
 # Never run two migrations at the same time (both would pick the same Waiting rows)
 concurrency:
