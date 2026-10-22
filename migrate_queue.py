@@ -1213,6 +1213,7 @@ LEGACY_FIRST_COL = 4
 # [EN] Rows read per request / written per request (keeps a single request from getting too large)
 EXTRACT_ROWS_PER_READ = 400
 EXTRACT_ROWS_PER_WRITE = 2000
+EXTRACT_UPDATES_PER_WRITE = 500
 # --extract 가 끝난 시각을 적는 칸: 큐 시트의 I1(라벨) / I2(시각). A~G열(큐 데이터) 밖이고 H열은 비워 둠
 # [TH] ช่องที่ --extract เขียนเวลาที่เสร็จ: I1 (ป้ายชื่อ) / I2 (เวลา) ของชีตคิว อยู่นอกคอลัมน์ A~G (ข้อมูลคิว) และเว้นคอลัมน์ H ไว้ว่าง
 # [EN] Where --extract writes when it finished: I1 (label) / I2 (time) of the queue sheet, outside columns A-G (the queue data) with column H left empty
@@ -1430,6 +1431,11 @@ class ExtractSummary:
     created_tab: bool = False
     refused: str = ""
     refreshed_at: str = ""
+    # 합치기(merge) 결과 / [TH] ผลของการรวม (merge) / [EN] Result of a merge
+    added: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    kept_done: int = 0
 
 
 def write_queue(sess: Any, sid: str, tab: str, rows: list[list]) -> None:
@@ -1454,6 +1460,82 @@ def refresh_stamp(now: Optional[datetime.datetime] = None) -> str:
     [EN] The "last extract" time text written to the queue sheet (Thai time, UTC+7)
     """
     return (now or NOW()).astimezone(REFRESH_TZ).strftime("%Y-%m-%d %H:%M:%S") + " (UTC+7)"
+
+
+@dataclass
+class MergePlan:
+    new_items: list[LegacyItem] = field(default_factory=list)   # 큐에 없는 항목 / [TH] รายการที่ยังไม่มีในคิว / [EN] items not in the queue yet
+    updates: dict[int, list] = field(default_factory=dict)      # 행 번호 -> 새 B~F 값 / [TH] เลขแถว -> ค่า B~F ใหม่ / [EN] row number -> new B..F values
+    unchanged: int = 0
+    kept_done: int = 0         # Done 이라 손대지 않은 행 / [TH] แถว Done ที่ไม่แตะ / [EN] Done rows left alone
+    done_link_differs: int = 0  # 그중 옛 시트의 링크가 다른 행 / [TH] ในนั้นที่ลิงก์ในชีตเก่าต่างออกไป / [EN] of those, rows whose legacy link differs
+    missing: int = 0           # 큐에는 있지만 옛 시트에는 없는 행 / [TH] อยู่ในคิวแต่ไม่อยู่ในชีตเก่าแล้ว / [EN] rows in the queue that are not in the legacy sheet any more
+
+
+def plan_merge(existing: list[list], items: list[LegacyItem]) -> MergePlan:
+    """
+    기존 큐(헤더 포함 값)와 옛 시트에서 만든 항목을 (Doc No, Date) 로 맞춰 봄:
+      * 큐에 없으면 새 행으로 추가 (Waiting)
+      * Done 이면 손대지 않음 (옛 시트의 링크가 달라도 그대로 둠)
+      * 그 외(Waiting / Error ...)는 상태(G열)는 그대로 두고 B~F 열(Date, Discipline, PDF URL, Folder URL, C/P)만 옛 시트 값으로 갱신
+      * 큐에만 있는 행은 건드리지 않음
+    [TH] จับคู่คิวเดิม (ค่าพร้อมหัวตาราง) กับรายการจากชีตเก่าด้วย (Doc No, Date):
+         * ไม่มีในคิว -> เพิ่มเป็นแถวใหม่ (Waiting)
+         * เป็น Done -> ไม่แตะ (ถึงลิงก์ในชีตเก่าจะต่างก็คงไว้)
+         * อื่นๆ (Waiting / Error ...) -> คงสถานะ (คอลัมน์ G) แต่อัปเดตคอลัมน์ B~F (Date, Discipline, PDF URL, Folder URL, C/P) ตามชีตเก่า
+         * แถวที่มีแต่ในคิว -> ไม่แตะ
+    [EN] Matches the existing queue (values incl. the header) against the items built from the legacy sheet by (Doc No, Date):
+         * not in the queue -> added as a new row (Waiting)
+         * Done -> left alone (even if the legacy link differs)
+         * anything else (Waiting / Error ...) -> the status (column G) is kept, but columns B..F (Date, Discipline, PDF URL, Folder URL, C/P)
+           are refreshed from the legacy sheet
+         * rows that exist only in the queue are not touched
+    """
+    index: dict[tuple[str, str], tuple[int, list[str]]] = {}
+    for number, row in enumerate(existing[1:], start=2):
+        cells = [str(c).strip() for c in row][:len(QUEUE_HEADER)]
+        cells += [""] * (len(QUEUE_HEADER) - len(cells))
+        if cells[0]:
+            index.setdefault((cells[0], cells[1]), (number, cells))
+    plan = MergePlan()
+    seen: set[tuple[str, str]] = set()
+    for it in items:
+        key = (it.doc_no, it.date)
+        hit = index.get(key)
+        if hit is None:
+            plan.new_items.append(it)
+            continue
+        seen.add(key)
+        number, cells = hit
+        wanted = it.to_row()[1:6]
+        if cells[6] == "Done":
+            plan.kept_done += 1
+            if it.pdf_url and cells[3] != it.pdf_url:
+                plan.done_link_differs += 1
+        elif cells[1:6] != wanted:
+            plan.updates[number] = wanted
+        else:
+            plan.unchanged += 1
+    plan.missing = len(index) - len(seen)
+    return plan
+
+
+def apply_merge(sess: Any, sid: str, tab: str, plan: MergePlan) -> None:
+    """
+    갱신은 B~F 열만 values:batchUpdate 로 (G열 상태는 건드리지 않음), 새 행은 append 로 (시트가 자동 확장됨)
+    [TH] อัปเดตเฉพาะคอลัมน์ B~F ด้วย values:batchUpdate (ไม่แตะสถานะคอลัมน์ G) แถวใหม่เพิ่มด้วย append (ชีตขยายให้เอง)
+    [EN] Updates go to columns B..F only, through values:batchUpdate (the status in column G is never touched);
+         new rows go in with append (the sheet grows by itself)
+    """
+    quoted = tab.replace("'", "''")
+    updates = sorted(plan.updates.items())
+    for i in range(0, len(updates), EXTRACT_UPDATES_PER_WRITE):
+        body = {"valueInputOption": "RAW",
+                "data": [{"range": f"'{quoted}'!B{row}:F{row}", "values": [values]} for row, values in updates[i:i + EXTRACT_UPDATES_PER_WRITE]]}
+        _sheets_call(sess, "POST", f"{SHEETS_BASE}/{sid}/values:batchUpdate", json=body)
+    rows = [it.to_row() for it in plan.new_items]
+    for i in range(0, len(rows), EXTRACT_ROWS_PER_WRITE):
+        append_rows(sess, sid, tab, rows[i:i + EXTRACT_ROWS_PER_WRITE], value_input="RAW")
 
 
 def write_refresh_time(sess: Any, sid: str, tab: str, stamp: str) -> None:
@@ -1512,32 +1594,54 @@ def extract_queue(args: argparse.Namespace, clients: Clients, key: str, log: Cal
         return summary
 
     exists = spec.queue_tab in tabs
-    if exists:
-        progress = queue_progress(read_values(sess, sid, f"'{spec.queue_tab.replace(chr(39), chr(39) * 2)}'!A:G"))
-        if any(progress.values()):
-            parts = [f"Done {progress['done']}", f"Error {progress['error']}"] + ([f"other {progress['other']}"] if progress["other"] else [])
-            summary.refused = ", ".join(parts)
-            if not args.overwrite:
-                log(f"  ✗ The {spec.queue_tab} queue already has processed rows ({summary.refused}) - rebuilding it would wipe every status and set all rows to Waiting\n"
-                    f"    Nothing was written. Add --overwrite if you really want that (back up column G first; "
-                    f"rows whose PDF is already in the DB are marked Done again without calling the AI on the next run)")
-                return summary
-            summary.refused = ""
-            log(f"  ⚠ --overwrite: the existing statuses ({', '.join(parts)}) will be wiped")
+    existing = read_values(sess, sid, f"'{spec.queue_tab.replace(chr(39), chr(39) * 2)}'!A:G") if exists else []
+    blank_queue = not any(str(c).strip() for r in existing for c in r)
+    # 새로 만들기: 탭이 없거나 비어 있거나 --overwrite 일 때. 그 외에는 기존 큐에 합침(merge): 상태를 지키고 새 항목만 추가
+    # [TH] สร้างใหม่ทั้งคิว: เมื่อไม่มีแท็บ / แท็บว่าง / ใส่ --overwrite นอกนั้นรวมเข้าคิวเดิม (merge): คงสถานะเดิมและเพิ่มเฉพาะรายการใหม่
+    # [EN] Rebuild the whole queue: when the tab is missing or empty, or with --overwrite. Otherwise merge into the existing queue:
+    #      the statuses are kept and only the new items are added
+    rebuild = args.overwrite or not exists or blank_queue
 
-    if args.dry_run:
-        for it in items[:5]:
-            log(f"  sample: {it.doc_no} | {it.date} | {it.discipline} | {'C' if it.completed else 'P'} | PDF link: {'yes' if it.pdf_url else 'no'}")
-        log(f"  (--dry-run) nothing was written: would write {len(items)} rows to {spec.queue_tab}" + ("" if exists else " (new tab)"))
-        return summary
-
-    if not exists:
-        _sheets_call(sess, "POST", f"{SHEETS_BASE}/{sid}:batchUpdate",
-                     json={"requests": [{"addSheet": {"properties": {"title": spec.queue_tab}}}]})
-        summary.created_tab = True
-    write_queue(sess, sid, spec.queue_tab, [it.to_row() for it in items])
-    summary.written = len(items)
-    log(f"  ✓ Wrote queue {spec.queue_tab}: {len(items)} rows (Waiting)" + (" - new tab created" if summary.created_tab else ""))
+    if rebuild:
+        if exists and not blank_queue:
+            progress = queue_progress(existing)
+            if any(progress.values()):
+                parts = [f"Done {progress['done']}", f"Error {progress['error']}"] + ([f"other {progress['other']}"] if progress["other"] else [])
+                log(f"  ⚠ --overwrite: the existing statuses ({', '.join(parts)}) will be wiped")
+        if args.dry_run:
+            for it in items[:5]:
+                log(f"  sample: {it.doc_no} | {it.date} | {it.discipline} | {'C' if it.completed else 'P'} | PDF link: {'yes' if it.pdf_url else 'no'}")
+            log(f"  (--dry-run) nothing was written: would write {len(items)} rows to {spec.queue_tab}" + ("" if exists else " (new tab)"))
+            return summary
+        if not exists:
+            _sheets_call(sess, "POST", f"{SHEETS_BASE}/{sid}:batchUpdate",
+                         json={"requests": [{"addSheet": {"properties": {"title": spec.queue_tab}}}]})
+            summary.created_tab = True
+        write_queue(sess, sid, spec.queue_tab, [it.to_row() for it in items])
+        summary.written = len(items)
+        log(f"  ✓ Wrote queue {spec.queue_tab}: {len(items)} rows (Waiting)" + (" - new tab created" if summary.created_tab else ""))
+    else:
+        header = [str(c).strip() for c in existing[0]][:len(QUEUE_HEADER)] if existing else []
+        if header != QUEUE_HEADER:
+            summary.refused = "unexpected header"
+            log(f"  ✗ The header row of {spec.queue_tab} is not the expected one ({' | '.join(QUEUE_HEADER)}) - nothing was written\n"
+                f"    Fix the header, or add --overwrite to rebuild the queue (every row becomes Waiting)")
+            return summary
+        plan = plan_merge(existing, items)
+        summary.added, summary.updated, summary.unchanged, summary.kept_done = len(plan.new_items), len(plan.updates), plan.unchanged, plan.kept_done
+        if plan.done_link_differs:
+            log(f"  ℹ {plan.done_link_differs} Done rows have a different PDF link in the legacy sheet (kept as is)")
+        counts = f"+{len(plan.new_items)} new, {len(plan.updates)} updated, {plan.unchanged} unchanged, {plan.kept_done} Done kept as is"
+        if plan.missing:
+            counts += f", {plan.missing} not in the legacy sheet any more (left alone)"
+        if args.dry_run:
+            for it in plan.new_items[:5]:
+                log(f"  sample (new): {it.doc_no} | {it.date} | {it.discipline} | {'C' if it.completed else 'P'} | PDF link: {'yes' if it.pdf_url else 'no'}")
+            log(f"  (--dry-run) nothing was written: would merge into {spec.queue_tab}: {counts}")
+            return summary
+        apply_merge(sess, sid, spec.queue_tab, plan)
+        summary.written = len(plan.new_items)
+        log(f"  ✓ Merged into {spec.queue_tab}: {counts}")
     # 행은 이미 기록됐으므로 시각을 쓰지 못해도(예: 탭의 열이 7개뿐) extract 자체는 실패로 보지 않음
     # [TH] แถวถูกเขียนไปแล้ว ถ้าเขียนเวลาไม่ได้ (เช่นแท็บมีแค่ 7 คอลัมน์) ก็ไม่นับว่า extract ล้มเหลว
     # [EN] The rows are already written, so if the time cannot be written (e.g. the tab has only 7 columns) the extract itself is not treated as failed
@@ -1606,9 +1710,9 @@ def resolve_legacy_spreadsheet_id(cli_value: Optional[str], target_id: str, envi
 def run_extract(args: argparse.Namespace, clients: Clients, keys: list[str], log: Callable[[str], None] = print,
                 sheet_title: str = "") -> int:
     """
-    큐별로 --extract 실행. 종료 코드: 0 = 정상, 2 = 실패했거나 (--overwrite 없이) 기존 상태 때문에 쓰지 않은 큐가 있음
-    [TH] รัน --extract ทีละคิว รหัสออก: 0 = ปกติ, 2 = มีคิวที่ล้มเหลวหรือไม่ได้เขียนเพราะมีสถานะเดิม (ไม่ได้ใส่ --overwrite)
-    [EN] Runs --extract queue by queue. Exit code: 0 = fine, 2 = a queue failed or was not written because of existing statuses (no --overwrite)
+    큐별로 --extract 실행. 종료 코드: 0 = 정상, 2 = 실패했거나 기존 큐의 헤더가 달라 (--overwrite 없이) 쓰지 않은 큐가 있음
+    [TH] รัน --extract ทีละคิว รหัสออก: 0 = ปกติ, 2 = มีคิวที่ล้มเหลวหรือไม่ได้เขียนเพราะหัวตารางของคิวเดิมไม่ตรง (ไม่ได้ใส่ --overwrite)
+    [EN] Runs --extract queue by queue. Exit code: 0 = fine, 2 = a queue failed or was not written because the existing queue's header is not the expected one (no --overwrite)
     """
     multi = len(keys) > 1
     exit_code = 0
@@ -1657,12 +1761,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="only list the rows that would be processed (no Drive/Gemini calls, no sheet writes)")
     p.add_argument("--check-access", action="store_true", help="check that the service account can open the PDF files (no Gemini calls, no sheet writes)")
     p.add_argument("--extract", action="store_true",
-                   help="build the queues from the legacy sheets (replaces extractLegacyDwrLinks / extractLegacyDrqLinks); no Drive/Gemini calls; needs PMIS_LEGACY_DWR_SHEET / PMIS_LEGACY_DRQ_SHEET; works with --dry-run and --queue")
+                   help="build the queues from the legacy sheets (replaces extractLegacyDwrLinks / extractLegacyDrqLinks); no Drive/Gemini calls; needs PMIS_LEGACY_DWR_SHEET / PMIS_LEGACY_DRQ_SHEET; works with --dry-run and --queue. "
+                        "A queue that already has rows is MERGED: statuses are kept, new items are appended, Waiting/Error rows get the legacy data (use --overwrite to rebuild instead)")
     p.add_argument("--legacy-spreadsheet", default=None, metavar="ID_OR_URL",
                    help="with --extract: the spreadsheet file (ID or URL) that holds the legacy tabs; the queues are still written to PMIS_SPREADSHEET_ID. "
                         "Default: PMIS_LEGACY_SPREADSHEET_ID, or the same file as PMIS_SPREADSHEET_ID. Share it with the service account")
     p.add_argument("--overwrite", action="store_true",
-                   help="with --extract: allow overwriting a queue that already has Done/Error rows (the Apps Script always did); without it such a queue is left untouched")
+                   help="with --extract: rebuild the whole queue from scratch instead of merging (clears it, every row becomes Waiting and every Done/Error status is wiped - what the Apps Script always did)")
     return p
 
 

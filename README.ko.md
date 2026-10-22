@@ -15,7 +15,7 @@ DB_DWR / DB_DRQ 열 순서는 기존과 완전히 동일하지만 내 PC 에서 
 | PDF 다운로드 -> Gemini -> DB_DWR / DB_DRQ 기록 -> `Done` 표시 | **이 Python 스크립트** |
 
 > **큐 다시 만들기:** Apps Script 의 `extractLegacyDwrLinks()` / `extractLegacyDrqLinks()` 는 큐를 `clear()` 한 뒤 **모든** 항목(이미 DB_DWR / DB_DRQ 에 있는 PDF 포함)을 `Waiting` 으로 다시 만들고, 기존 `Done` / `Error…` 상태는 모두 지워집니다.
-> Python 스크립트가 이를 보완합니다: PDF 가 이미 DB 에 있는 `Waiting` 행(PDF Link 열의 Drive 파일 ID 로 비교)은 AI 호출 없이 `Done` 으로 표시됩니다. `--extract` 는 `--overwrite` 를 붙였을 때만 같은 동작을 하며, 붙이지 않으면 `Done` / `Error…` 행이 있는 큐는 건드리지 않습니다("큐 만들기" 참고). 큐를 덮어쓰기 전에는 항상 G열(과 DB)을 먼저 백업해 두세요.
+> Python 스크립트가 이를 보완합니다: PDF 가 이미 DB 에 있는 `Waiting` 행(PDF Link 열의 Drive 파일 ID 로 비교)은 AI 호출 없이 `Done` 으로 표시됩니다. `--extract` 는 `--overwrite` 를 붙였을 때만 같은 동작을 하며, 붙이지 않으면 이미 행이 있는 큐에 **합칩니다(merge)**: 모든 상태는 그대로 두고 새 항목만 추가합니다("큐 만들기" 참고). `--overwrite` 를 쓰기 전에는 항상 G열(과 DB)을 먼저 백업해 두세요.
 
 ## 설치 (최초 1회) - PowerShell
 
@@ -84,7 +84,11 @@ python migrate_queue.py --extract --queue drq   # 한 큐만 (그 큐의 탭 이
 
 - `--extract` 는 `GEMINI_API_KEY` 도 Drive 접근도 필요 없고, `--limit` 은 무시하며, `--only-rows` / `--check-access` 와 함께 쓸 수 없습니다.
 - 큐마다 고유 항목 수, PDF 링크가 없는 항목 수(이 행들은 이식할 때 `Error: No URL` 이 됨), 헤더가 비어 건너뛴 칸 수를 콘솔에 보여 줍니다.
-- **안전장치:** 큐에 이미 `Done` / `Error…` 행이 있으면 `--extract` 는 아무것도 쓰지 않고 종료 코드 2 로 끝납니다. 그래도 다시 만들려면 `--overwrite` 를 붙이세요(Apps Script 처럼 모든 행이 `Waiting` 이 됩니다). `Waiting` 행만 있는 큐는 바로 다시 만들 수 있습니다.
+- **합치기(merge, 큐에 이미 행이 있을 때의 기본 동작):** `--extract` 는 각 항목을 **Doc No + Date** 로 큐와 맞춰 보며 큐를 비우지 않습니다. 새 항목은 `Waiting` 으로 맨 끝에 추가됩니다. `Done` 행은 건드리지 않으며(옛 시트의 PDF 링크가 달라도 그대로 두고, 콘솔에 개수를 알려 줍니다), 그 밖의 행(`Waiting`, `Error…`)은 G열 상태는 유지하되 Date, Discipline, PDF URL, Folder URL, C/P(B~F열)를 옛 시트 값으로 갱신합니다. 큐에만 있는 행은 건드리지 않습니다. 옛 시트가 바뀌지 않았다면 다시 실행해도 아무것도 바뀌지 않으므로 예약 실행도 안전합니다. `--dry-run` 은 계획(`+N new, M updated, K unchanged, D Done kept as is`)을 보여 줍니다.
+- **다시 만들기:** `--overwrite` 를 붙이면 큐를 비우고 모든 행을 `Waiting` 으로 다시 만듭니다(Apps Script 와 동일. 모든 `Done` / `Error…` 상태가 지워지니 G열을 먼저 백업하세요). 큐 탭이 없거나 비어 있으면 그냥 새로 만듭니다. 탭의 헤더 행이 `Doc No | Date | Discipline | PDF URL | Folder URL | Status(C/P) | AI Processed` 가 아니면, 고치거나 `--overwrite` 를 붙이기 전까지 `--extract` 는 아무것도 쓰지 않고 종료 코드 2 로 끝납니다.
+- **새로고침 시각:** 실제로 큐를 쓴 extract(`--dry-run` 제외)마다 `I1` = `Last extract (refresh time)`, `I2` = 태국 시간(UTC+7)의 시각(예: `2026-10-22 14:05:33 (UTC+7)`)이 기록되어 시트에서 마지막 새로고침 시점을 알 수 있습니다. I열은 큐 데이터(A~G열) 밖입니다.
+- **옛 탭이 다른 파일에 있을 때:** 기본은 옛 탭이 큐와 같은 스프레드시트에 있는 경우입니다. 다른 파일에서 읽으려면 `--legacy-spreadsheet <ID 또는 URL>` 을 쓰거나 `PMIS_LEGACY_SPREADSHEET_ID` 를 설정하세요. 큐는 계속 `PMIS_SPREADSHEET_ID` 에 기록됩니다. 그 파일을 서비스 계정과 공유하세요(보기 권한이면 충분).
+- **`.env`:** 위의 모든 변수는 스크립트 옆의 `.env` 파일에 적을 수 있습니다(`.env.example` 참고). 이미 설정된 환경 변수가 우선합니다.
 - Apps Script 와 다른 점: 큐 값을 일반 텍스트(`RAW`)로 기록하므로 날짜·숫자·앞자리 0 이 자동 변환되지 않고, 큐 시트의 값만 지우며(서식은 유지), 행을 append 로 추가하므로 시트가 알아서 늘어납니다.
 - 서비스 계정에는 스프레드시트 **편집자(Editor)** 권한이 필요합니다(옛 탭을 읽고 큐 탭에 기록). PDF 는 건드리지 않습니다.
 

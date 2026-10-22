@@ -50,7 +50,7 @@ on:
         type: string
         default: ""
       overwrite:
-        description: "extract only: allow rebuilding a queue that already has Done/Error rows (wipes every status back to Waiting)"
+        description: "extract only: rebuild the queue from scratch instead of merging (clears it: every row becomes Waiting and every Done/Error status is wiped). Normally leave this off"
         type: boolean
         default: false
 
@@ -189,7 +189,7 @@ jobs:
           python migrate_queue.py "${args[@]}" > "$RUNNER_TEMP/run.log" 2>&1 || status=$?
           if [[ "$extract" == true ]]; then
             # --extract prints tab names, spreadsheet names/IDs and sample Doc Nos: keep only the counts, and cut the tab name and any error detail
-            extract_safe='^(\[[A-Z]+\] Read tab |  (✓ Wrote queue|✓ Refresh time written to [A-Z_]+!I2|⚠ The rows are written, but the refresh time|⚠ [0-9]+ items have no PDF link|⚠ skipped [0-9]+ cells|⚠ --overwrite: |No items found|✗ The [A-Z_]+ queue already has processed rows|\(--dry-run\) nothing was written)|    Nothing was written|✗ Could not build queue )'
+            extract_safe='^(\[[A-Z]+\] Read tab |  (✓ Wrote queue|✓ Merged into [A-Z_]+: |ℹ [0-9]+ Done rows have a different PDF link|✓ Refresh time written to [A-Z_]+!I2|⚠ The rows are written, but the refresh time|⚠ [0-9]+ items have no PDF link|⚠ skipped [0-9]+ cells|⚠ --overwrite: |No items found|✗ The header row of [A-Z_]+ is not the expected one|\(--dry-run\) nothing was written)|    Fix the header|✗ Could not build queue )'
             grep -E "$extract_safe" "$RUNNER_TEMP/run.log" \
               | sed -E "s/Read tab '.*': /Read legacy tab: /; s/^(✗ Could not build queue [A-Z_]+).*/\1 - run the script locally for the reason/; s/^(  ⚠ The rows are written, but the refresh time could not be written).*/\1 (run locally for the reason)/" \
               > "$RUNNER_TEMP/counts.log" || true
@@ -199,7 +199,7 @@ jobs:
           cat "$RUNNER_TEMP/counts.log"
           if [[ $status -ne 0 ]]; then
             if [[ "$extract" == true ]]; then
-              echo "::error::migrate_queue.py exited with code $status (2 = a queue could not be built, or it was left untouched because it already has Done/Error rows - use overwrite). Run the script locally for the full log."
+              echo "::error::migrate_queue.py exited with code $status (2 = a queue could not be built, or it was left untouched because its header row is not the expected one - fix it or use overwrite). Run the script locally for the full log."
             else
               echo "::error::migrate_queue.py exited with code $status (2 = stopped early or a queue could not be read). Row details are in column G of the queue sheet; run the script locally for the full log."
             fi
