@@ -68,6 +68,10 @@ Apps Script(extractDriveFileForAI)와 동일하게 맞춘 점 / [TH] ส่ว�
   PMIS_LEGACY_DRQ_SHEET           --extract 전용: DRQ 큐를 만들 옛 시트 탭 이름 (필수, 코드에 기본값 없음)
                                   [TH] เฉพาะ --extract: ชื่อแท็บชีตเก่าที่ใช้สร้างคิว DRQ (จำเป็น ไม่มีค่าเริ่มต้นในโค้ด)
                                   [EN] --extract only: name of the legacy sheet tab the DRQ queue is built from (required; no default in the code)
+
+위 변수는 스크립트 옆의 .env 파일(KEY=value)에 적어 둘 수 있음 (.env.example 참고). 이미 설정된 환경 변수가 우선
+[TH] ตัวแปรข้างบนเขียนไว้ในไฟล์ .env ข้างสคริปต์ได้ (KEY=value ดู .env.example) ตัวแปรที่ตั้งไว้ในสภาพแวดล้อมแล้วมีสิทธิ์เหนือกว่า
+[EN] The variables above can be put in a .env file next to the script (KEY=value, see .env.example); variables already set in the environment win
 """
 from __future__ import annotations
 
@@ -1665,6 +1669,23 @@ def require_spreadsheet_id(environ: Optional[dict] = None) -> str:
     return value
 
 
+def load_env_file(path: Optional[str] = None) -> bool:
+    """
+    스크립트 옆의 .env 를 읽어 환경 변수로 등록 (이미 설정된 변수는 덮어쓰지 않음). 파일이 없거나 python-dotenv 가 없으면 아무 것도 하지 않음
+    [TH] อ่านไฟล์ .env ข้างสคริปต์แล้วตั้งเป็นตัวแปรสภาพแวดล้อม (ตัวแปรที่ตั้งไว้แล้วจะไม่ถูกเขียนทับ) ถ้าไม่มีไฟล์หรือไม่มี python-dotenv จะไม่ทำอะไร
+    [EN] Loads the .env next to the script into the environment (variables that are already set are not overwritten);
+         does nothing when the file or python-dotenv is missing. Returns True when a file was loaded
+    """
+    env_path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(env_path):
+        return False
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return False
+    return bool(load_dotenv(env_path, override=False, encoding="utf-8"))
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     # Windows 에서 파일로 redirect 해도 태국어/기호가 깨지지 않도록 UTF-8 로 설정
     # [TH] ภาษาไทย/สัญลักษณ์ไม่พังเมื่อ redirect ไปไฟล์บน Windows
@@ -1702,6 +1723,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    # main() 이 아니라 여기서 읽음: 테스트가 main() 을 부를 때 개발자의 .env 가 섞이지 않도록
+    # [TH] โหลดที่นี่ ไม่ใช่ใน main(): เวลา test เรียก main() จะได้ไม่ปนกับ .env ของนักพัฒนา
+    # [EN] Loaded here, not in main(): so a developer's .env never leaks into tests that call main()
+    load_env_file()
     try:
         sys.exit(main())
     except KeyboardInterrupt:

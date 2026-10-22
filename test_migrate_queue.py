@@ -4,6 +4,7 @@
 [EN] Tests using a fake sheet/Drive/Gemini (no network or real keys needed).  Run: python -m pytest -q
 """
 import json
+import os
 import re
 import threading
 import urllib.parse
@@ -1275,3 +1276,18 @@ def test_the_normal_run_is_unchanged_without_extract(monkeypatch, capsys):
     rec = RunRecorder()
     assert main_with(monkeypatch, ["--queue", "dwr"], rec) == 0 and rec.calls == [("dwr", True, 30)]
     assert "model:" in capsys.readouterr().out
+
+
+def test_load_env_file_sets_missing_variables_but_never_overrides(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PMIS_TEST_NEW=from-file\nPMIS_TEST_KEPT=from-file\n", encoding="utf-8")
+    monkeypatch.delenv("PMIS_TEST_NEW", raising=False)
+    monkeypatch.setenv("PMIS_TEST_KEPT", "from-environment")
+    assert mq.load_env_file(str(env_file)) is True
+    assert os.environ["PMIS_TEST_NEW"] == "from-file"
+    assert os.environ["PMIS_TEST_KEPT"] == "from-environment"
+    monkeypatch.delenv("PMIS_TEST_NEW", raising=False)
+
+
+def test_load_env_file_does_nothing_without_a_file(tmp_path):
+    assert mq.load_env_file(str(tmp_path / "missing.env")) is False
