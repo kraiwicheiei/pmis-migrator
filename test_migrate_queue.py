@@ -3,6 +3,7 @@
 [TH] เทสต์ด้วยชีต/Drive/Gemini จำลอง (ไม่ต้องใช้เครือข่ายหรือคีย์จริง)  รัน: python -m pytest -q
 [EN] Tests using a fake sheet/Drive/Gemini (no network or real keys needed).  Run: python -m pytest -q
 """
+import datetime
 import json
 import os
 import re
@@ -17,6 +18,9 @@ import migrate_queue as mq
 # [TH] ไม่รอ backoff จริง
 # [EN] No real backoff waiting
 mq.SLEEP = lambda s: None
+# 고정된 시각 (UTC 07:05:33 = 태국 14:05:33) / [TH] เวลาคงที่ (UTC 07:05:33 = ไทย 14:05:33) / [EN] A fixed clock (UTC 07:05:33 = Thai 14:05:33)
+mq.NOW = lambda: datetime.datetime(2026, 10, 22, 7, 5, 33, tzinfo=datetime.timezone.utc)
+STAMP = "2026-10-22 14:05:33 (UTC+7)"
 
 # 길이 33 의 가짜 file id
 # [TH] file id ปลอมความยาว 33
@@ -984,6 +988,9 @@ class FakeLegacy:
         # [EN] When set, the legacy tabs live only in that separate spreadsheet and the queues only in SID
         self.legacy_sid = legacy_sid
         self.sheets_calls = []
+        # 탭 -> [라벨, 시각] / [TH] แท็บ -> [ป้ายชื่อ, เวลา] / [EN] tab -> [label, time]
+        self.refresh = {}
+        self.refresh_error = False
         self.row_count = row_count
         self.events = []
         self.grid_reads = []
@@ -1031,6 +1038,15 @@ class FakeLegacy:
             tab = path.split("/values/")[1][:-len(":clear")].strip("'")
             self.events.append(("clear", tab))
             self.queues[tab] = []
+            return Resp(200, {})
+        if method == "PUT" and path.endswith("!I1:I2"):
+            assert params["valueInputOption"] == "RAW"
+            if self.refresh_error:
+                return Resp(400, text="Range exceeds grid limits")
+            tab = re.match(r"'(.+)'!I1:I2$", path.split("/values/")[1]).group(1)
+            self.events.append(("refreshed", tab))
+            self.refresh[tab] = [r[0] for r in kw["json"]["values"]]
+            self.written += kw["json"]["values"]
             return Resp(200, {})
         if method == "PUT" and "/values/" in path:
             assert params["valueInputOption"] == "RAW"
@@ -1138,7 +1154,7 @@ def test_extract_creates_the_queue_with_header_waiting_rows_and_raw_values():
     w = FakeLegacy()
     summary, logs = extract_logs(w)
     assert w.queues["MIGRATION_QUEUE"] == [mq.QUEUE_HEADER] + DWR_ROWS
-    assert [e[0] for e in w.events] == ["addSheet", "clear", "header", "append"]
+    assert [e[0] for e in w.events] == ["addSheet", "clear", "header", "append", "refreshed"]
     assert (summary.items, summary.completed, summary.written, summary.created_tab) == (4, 1, 4, True)
     assert not NON_ENGLISH.search(json.dumps(w.written, ensure_ascii=False))     # 시트에 쓰는 값은 영어 / [TH] ค่าที่เขียนลงชีตเป็นภาษาอังกฤษ / [EN] values written to the sheet are English
     assert any("Wrote queue MIGRATION_QUEUE: 4 rows" in m for m in logs) and any("2 items have no PDF link" in m for m in logs)
@@ -1334,7 +1350,7 @@ def test_extract_reads_the_legacy_tab_from_another_spreadsheet_and_writes_to_the
     w = FakeLegacy(legacy_sid=LEGACY_FILE)
     summary, logs = extract_logs(w, legacy_spreadsheet_id=LEGACY_FILE, spreadsheet_id="SID")
     assert w.queues["MIGRATION_QUEUE"] == [mq.QUEUE_HEADER] + DWR_ROWS and summary.written == 4
-    assert [e[0] for e in w.events] == ["addSheet", "clear", "header", "append"]                 # the queue is written to the target file only
+    assert [e[0] for e in w.events] == ["addSheet", "clear", "header", "append", "refreshed"]                 # the queue is written to the target file only
     assert any("Legacy spreadsheet: Legacy Spreadsheet (LEGACYFILEID123)" in m for m in logs)
     assert all(LEGACY_FILE not in path for method, path in w.sheets_calls if method != "GET")
 
@@ -1375,3 +1391,51 @@ def test_legacy_spreadsheet_option_needs_extract(monkeypatch):
     with pytest.raises(SystemExit) as e:
         main_with(monkeypatch, ["--queue", "dwr", "--legacy-spreadsheet", "abc"], RunRecorder())
     assert "--legacy-spreadsheet only works together with --extract" in str(e.value.code)
+
+
+# --- 새로고침 시각 / refresh time / เวลา refresh ---
+def test_refresh_stamp_is_thai_time():
+    assert mq.refresh_stamp() == STAMP
+    assert mq.refresh_stamp(datetime.datetime(2026, 1, 1, 18, 0, 0, tzinfo=datetime.timezone.utc)) == "2026-01-02 01:00:00 (UTC+7)"   # crosses midnight
+
+
+def test_extract_writes_the_refresh_time_to_each_queue_sheet():
+    w = FakeLegacy()
+    summary, logs = extract_logs(w, "dwr")
+    assert w.refresh["MIGRATION_QUEUE"] == [mq.QUEUE_REFRESH_LABEL, STAMP] and summary.refreshed_at == STAMP
+    assert any(f"Refresh time written to MIGRATION_QUEUE!I2: {STAMP}" in m for m in logs)
+    extract_logs(w, "drq")
+    assert w.refresh["MIGRATION_QUEUE_DRQ"] == [mq.QUEUE_REFRESH_LABEL, STAMP]
+    assert [e for e in w.events if e[0] == "refreshed"] == [("refreshed", "MIGRATION_QUEUE"), ("refreshed", "MIGRATION_QUEUE_DRQ")]
+    first_refresh = w.events.index(("refreshed", "MIGRATION_QUEUE"))
+    assert [e[0] for e in w.events[:first_refresh + 1]] == ["addSheet", "clear", "header", "append", "refreshed"]   # after the sheet is cleared and filled
+
+
+def test_refresh_time_is_not_written_when_nothing_was_written():
+    w = FakeLegacy()
+    extract_logs(w, dry_run=True)
+    assert w.refresh == {}
+    existing = [mq.QUEUE_HEADER, qrow(1, "Done")]
+    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in existing]})
+    summary, _ = extract_logs(w)                                                     # refused: left untouched
+    assert w.refresh == {} and summary.refreshed_at == ""
+    empty = {"LEGACY-DWR": {3: LEGACY_HEADER, 4: mk({0: txt("R-1"), 4: txt("x")})}, "LEGACY-DRQ": {}}
+    w = FakeLegacy(grids=empty)
+    extract_logs(w)
+    assert w.refresh == {}
+
+
+def test_a_failed_refresh_time_write_does_not_fail_the_extract():
+    w = FakeLegacy()
+    w.refresh_error = True
+    summary, logs = extract_logs(w)
+    assert summary.written == 4 and summary.refreshed_at == "" and w.queues["MIGRATION_QUEUE"][1:] == DWR_ROWS
+    assert any("rows are written, but the refresh time could not be written" in m for m in logs)
+    assert mq.run_extract(xargs(queue="dwr"), w.clients(), ["dwr"], log=lambda m: None) == 0
+
+
+def test_the_refresh_time_cells_are_outside_the_queue_columns():
+    assert mq.REFRESH_COL == "I" and len(mq.QUEUE_HEADER) == 7                        # A-G data, H empty, I label/time
+    w = FakeLegacy(legacy_sid=LEGACY_FILE)
+    extract_logs(w, legacy_spreadsheet_id=LEGACY_FILE)
+    assert w.refresh["MIGRATION_QUEUE"][1] == STAMP and all(STAMP not in str(r) for r in w.queues["MIGRATION_QUEUE"])
