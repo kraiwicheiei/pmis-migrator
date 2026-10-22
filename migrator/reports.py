@@ -29,7 +29,7 @@ def cell_value(v: Any) -> Any:
     return "'" + v if v.startswith("=") else v
 
 
-def build_db_row(spec: QueueSpec, data: dict, pdf_url: str, folder_url: str) -> list:
+def build_db_row(spec: QueueSpec, data: dict, pdf_url: str, folder_url: str, cp: str = "") -> list:
     row = []
     for col in spec.columns:
         kind = col[0]
@@ -44,6 +44,8 @@ def build_db_row(spec: QueueSpec, data: dict, pdf_url: str, folder_url: str) -> 
             row.append(pdf_url)
         elif kind == "folder":
             row.append(folder_url)
+        elif kind == "cp":
+            row.append(cp)
     return row
 
 

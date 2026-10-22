@@ -3,11 +3,14 @@
 [TH] เทสต์ --public-log: ชื่อ/ID/รายละเอียด error ต้องไม่หลุดไปใน log สาธารณะ แต่ตัวเลขและสถานะต้องยังอยู่
 [EN] Tests for --public-log: no names / IDs / error details may leak into the public log, while the counts and statuses stay
 """
+from migrator.cp_column import run_backfill
 from migrator.public_log import MAX_STOP_REASON, make_log, sanitize
+from migrator.reports import build_db_row
+from migrator.specs import SPECS
 from migrator.extract import run_extract
 from migrator.runner import run, run_queues
 
-from tests.fakes import FID, Resp, ns, world
+from tests.fakes import DWR_JSON, FID, FOLDER, Resp, URL, ns, world
 from tests.legacy_fakes import FakeLegacy, LEGACY_FILE, extract_logs, extract_main, xargs
 
 
@@ -151,3 +154,29 @@ def test_without_the_option_main_still_prints_the_details(monkeypatch, capsys):
     code, _ = extract_main(monkeypatch, ["--extract", "--dry-run"])
     out = capsys.readouterr().out
     assert code == 0 and "sheet: Example Spreadsheet (SID)" in out and "Read tab 'LEGACY-DWR'" in out
+
+
+# --- --backfill-cp / the C/P backfill / การเติม C/P ---
+def test_sanitize_handles_the_backfill_lines():
+    keep = ("[DWR] Backfill C/P in DB_DWR: 10 to fill (C=6, P=4), 0 already have a C/P, 3 not found in MIGRATION_QUEUE, 1 with different C/P values in MIGRATION_QUEUE, 0 without a PDF link",
+            "  ✓ Filled C/P in DB_DWR!T: 10 rows", "  ✓ Wrote the header 'Status (C/P)' to DB_DWR!T1", "  (--dry-run) nothing was written: would fill 10 cells of DB_DWR!T")
+    for line in keep:
+        assert sanitize(line) == line
+    assert sanitize("===== Backfill C/P DWR: DB_DWR <- MIGRATION_QUEUE | sheet: Secret Title =====") == "===== Backfill C/P DWR: DB_DWR <- MIGRATION_QUEUE ====="
+    assert sanitize("✗ Could not backfill C/P in DB_DWR: DB_DWR!T1 already has the header 'Remarks'") == "✗ Could not backfill C/P in DB_DWR - run the script locally for the reason"
+
+
+def test_backfill_has_no_secret_in_its_public_log():
+    w = world(["Done"] * 2)
+    w.queue[1][5], w.queue[2][5] = "C", "P"
+    w.db.extend([build_db_row(SPECS["dwr"], DWR_JSON, URL(1), FOLDER), build_db_row(SPECS["dwr"], DWR_JSON, URL(2), FOLDER)])
+    logs = []
+    run_backfill(ns(dry_run=True), w.clients(), ["dwr"], log=logs.append, sheet_title="Example Spreadsheet")
+    run_backfill(ns(), w.clients(), ["dwr"], log=logs.append, sheet_title="Example Spreadsheet")
+    w.cp_header = "Remarks"
+    w.db[1][19] = ""
+    run_backfill(ns(), w.clients(), ["dwr"], log=logs.append, sheet_title="Example Spreadsheet")      # a header problem: the error text must be cut
+    text = public(logs)
+    assert_no_secret(text)
+    assert "Backfill C/P in DB_DWR: 2 to fill (C=1, P=1)" in text and "Filled C/P in DB_DWR!T: 2 rows" in text
+    assert "===== Backfill C/P DWR: DB_DWR <- MIGRATION_QUEUE =====" in text and "Remarks" not in text and "Could not backfill C/P in DB_DWR - run the script locally" in text

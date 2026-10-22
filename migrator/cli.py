@@ -11,6 +11,7 @@ import sys
 from typing import Optional
 
 from .config import DEFAULT_API_VERSION, DEFAULT_MODEL, LARGE_PDF_MB, SCOPES
+from .cp_column import run_backfill
 from .extract import run_extract
 from .models import Clients
 from .public_log import make_log
@@ -52,6 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--legacy-spreadsheet", default=None, metavar="ID_OR_URL",
                    help="with --extract: the spreadsheet file (ID or URL) that holds the legacy tabs; the queues are still written to PMIS_SPREADSHEET_ID. "
                         "Default: PMIS_LEGACY_SPREADSHEET_ID, or the same file as PMIS_SPREADSHEET_ID. Share it with the service account")
+    p.add_argument("--backfill-cp", action="store_true",
+                   help="fill the C/P column (T in DB_DWR, S in DB_DRQ) for the rows that are already there, matching each DB row with the queue row of the same PDF (Drive file ID); "
+                        "rows that already have a C/P are never changed and conflicting values are skipped; no Drive/Gemini calls; works with --dry-run and --queue")
     p.add_argument("--public-log", action="store_true",
                    help="print only counts and statuses (no tab names, sheet names / IDs, Doc Nos or error details), so the output is safe in the Actions log of a public repository; run without it locally for the details")
     p.add_argument("--overwrite", action="store_true",
@@ -103,13 +107,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             sys.exit("--extract cannot be combined with --only-rows or --check-access")
         args.legacy_tabs = require_legacy_sheet_names(keys)
         args.legacy_spreadsheet_id = resolve_legacy_spreadsheet_id(args.legacy_spreadsheet, args.spreadsheet_id)
+    elif args.backfill_cp and (args.only_rows or args.check_access):
+        sys.exit("--backfill-cp cannot be combined with --only-rows or --check-access")
     elif args.overwrite:
         sys.exit("--overwrite only works together with --extract")
     elif args.legacy_spreadsheet:
         sys.exit("--legacy-spreadsheet only works together with --extract")
     if args.only_rows and len(keys) > 1:
         sys.exit("--only-rows works with one queue: add --queue dwr or --queue drq (row numbers belong to that queue sheet)")
-    clients = make_clients(args, need_gemini=not (args.dry_run or args.check_access or args.extract))
+    clients = make_clients(args, need_gemini=not (args.dry_run or args.check_access or args.extract or args.backfill_cp))
     title, title_error = spreadsheet_title(clients.sheets, args.spreadsheet_id)
     if title:
         sheet_label = f"{title} ({args.spreadsheet_id})"
@@ -119,6 +125,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.extract:
         log(f"service account: {clients.sa_email} | sheet: {sheet_label} | mode: build the queues from the legacy sheets (--extract)")
         return run_extract(args, clients, keys, log=log, sheet_title=title)
+    if args.backfill_cp:
+        log(f"service account: {clients.sa_email} | sheet: {sheet_label} | mode: fill the C/P column of the DB tabs (--backfill-cp)")
+        return run_backfill(args, clients, keys, log=log, sheet_title=title)
     log(f"service account: {clients.sa_email} | sheet: {sheet_label} | model: {clients.model}")
     return run_queues(args, clients, keys, log=log, sheet_title=title)
 

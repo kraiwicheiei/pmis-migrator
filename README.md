@@ -92,6 +92,21 @@ python migrate_queue.py --extract --queue drq   # only one queue (then only its 
 - Differences from Apps Script: the queue values are written as plain text (`RAW`), so dates, numbers and leading zeros are never auto-converted; only the values of the queue sheet are cleared (its formatting stays); rows are appended, so the sheet grows by itself.
 - The service account needs **Editor** access to the spreadsheet (it reads the legacy tab and writes the queue tab). The PDFs are not touched.
 
+## C/P in the DB: column `T` (DWR) / `S` (DRQ), and `--backfill-cp`
+
+Every row the migration writes to `DB_DWR` / `DB_DRQ` now carries the **C/P** value of its queue row (column F, `Status(C/P)`), copied as it is, in **column T of `DB_DWR`** and **column S of `DB_DRQ`** (header `Status (C/P)` in both). The existing columns do not move: `DB_DWR` stays A-S (`Folder Link` is S), and in `DB_DRQ` the new column comes right after `Folder Link` (P) and `Ext1` / `Ext2` (Q, R).
+
+- Before the first new row is written, the script looks at the header cell (`T1` in `DB_DWR`, `S1` in `DB_DRQ`) of the DB tab: an empty cell is filled with `Status (C/P)`; the same header is kept; **any other header stops that queue** (`✗ Could not process queue ...`) so the value is never written under another column.
+- Rows that are already in the DB have no C/P. Fill them with `--backfill-cp` (no Drive / Gemini calls, no `GEMINI_API_KEY` needed):
+
+```powershell
+python migrate_queue.py --backfill-cp --dry-run     # the plan: how many cells would be filled (C / P), how many cannot be matched
+python migrate_queue.py --backfill-cp               # fill both DB tabs
+python migrate_queue.py --backfill-cp --queue dwr   # one tab only
+```
+
+  Each DB row is matched with the queue row of the **same PDF** (Drive file ID in the PDF Link column). A cell that already has a C/P is never changed, a row whose PDF is not in the queue is left empty, and a PDF that has **different** C/P values in the queue (for example C in one row and P in another) is skipped, not guessed; the console reports each count. The command can be run again: it only fills the cells that are still empty. It cannot be combined with `--extract`, `--only-rows` or `--check-access`.
+
 ## What `--check-access` checks
 
 For every pending row it extracts the file ID from the PDF URL column and asks Drive for the file's metadata (name, type, size, trashed or not) using the service account.
@@ -168,6 +183,7 @@ migrator/
   sheets.py drive.py gemini.py     the three APIs
   reports.py            parsing Gemini's JSON, building the DB rows
   extract.py            --extract (legacy_sheet.py reads, queue_writer.py writes / merges)
+  cp_column.py          the C/P column of the DB tabs (T in DB_DWR, S in DB_DRQ): header check, --backfill-cp
   stamps.py             the refresh time (I1:I2) and the migration time (K1:K2) in the queue sheet
   specs.py config.py models.py utils.py clock.py
 tests/                  one test file per module + fakes.py / legacy_fakes.py

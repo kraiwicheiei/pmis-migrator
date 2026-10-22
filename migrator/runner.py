@@ -13,11 +13,12 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .config import PRICES_USD_PER_M
+from .cp_column import ensure_cp_header
 from .models import Clients, Job, RowResult, RunControl, Usage
 from .processing import process_job
 from .reports import build_db_row
 from .sheets import SheetsError, append_rows, read_values, write_statuses
-from .specs import QueueSpec, SPECS
+from .specs import DB_CP_HEADER, QueueSpec, SPECS
 from .stamps import MIGRATION_COL, time_stamp, write_migration_time
 from .utils import chunked, col_letter, error_text, extract_file_id, parse_row_spec
 
@@ -42,7 +43,7 @@ def select_jobs(
                 pending = True
             if not pending:
                 continue
-        jobs.append(Job(row=idx, pdf_url=pdf_url, folder_url=folder_url, prior_status=status, doc_no=str(cells[0]).strip()))
+        jobs.append(Job(row=idx, pdf_url=pdf_url, folder_url=folder_url, prior_status=status, doc_no=str(cells[0]).strip(), cp=str(cells[5]).strip()))
     return jobs
 
 
@@ -199,6 +200,14 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
         summary.reconciled = len(reconciled_updates)
         log(f"{summary.reconciled} rows are already in {spec.db_tab} -> marked Done without calling the AI (rows: {sorted(reconciled_updates)[:20]})")
 
+    # 새 행을 DB 에 쓰기 전에 DB 의 C/P 열 머리글을 확인 (비어 있으면 채우고, 다른 머리글이면 이 큐를 중단)
+    # [TH] ก่อนเขียนแถวใหม่ลง DB ให้เช็กหัวตารางคอลัมน์ C/P (ถ้าว่างจะเติมให้ ถ้าเป็นหัวอื่นจะหยุดคิวนี้)
+    # [EN] Before new rows are written to the DB, check the header of its C/P column (an empty one is filled, a different one stops this queue)
+    if to_run:
+        header_state = ensure_cp_header(clients.sheets, sid, spec)
+        if header_state == "written":
+            log(f"  ✓ Wrote the header '{DB_CP_HEADER}' to {spec.db_tab}!{col_letter(spec.db_cp_col + 1)}1")
+
     max_bytes = args.max_mb * 1_000_000
     interrupted = False
     for chunk in chunked(to_run, args.batch):
@@ -243,7 +252,7 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
         #      (the current Apps Script writes the column-G statuses first and the DB afterwards, so a failed DB write
         #      can leave rows marked Done with no data)
         if ok:
-            db_rows = [build_db_row(spec, r.data or {}, r.job.pdf_url, r.job.folder_url) for r in ok]
+            db_rows = [build_db_row(spec, r.data or {}, r.job.pdf_url, r.job.folder_url, r.job.cp) for r in ok]
             try:
                 append_rows(clients.sheets, sid, spec.db_tab, db_rows)
             except SheetsError as e:

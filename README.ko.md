@@ -92,6 +92,21 @@ python migrate_queue.py --extract --queue drq   # 한 큐만 (그 큐의 탭 이
 - Apps Script 와 다른 점: 큐 값을 일반 텍스트(`RAW`)로 기록하므로 날짜·숫자·앞자리 0 이 자동 변환되지 않고, 큐 시트의 값만 지우며(서식은 유지), 행을 append 로 추가하므로 시트가 알아서 늘어납니다.
 - 서비스 계정에는 스프레드시트 **편집자(Editor)** 권한이 필요합니다(옛 탭을 읽고 큐 탭에 기록). PDF 는 건드리지 않습니다.
 
+## DB 의 C/P: `T`열(DWR) / `S`열(DRQ)과 `--backfill-cp`
+
+마이그레이션이 `DB_DWR` / `DB_DRQ` 에 쓰는 모든 행에는 큐 행의 **C/P** 값(F열 `Status(C/P)`)이 그대로 복사되어 **`DB_DWR` 의 T열**과 **`DB_DRQ` 의 S열**(둘 다 머리글 `Status (C/P)`)에 들어갑니다. 기존 열은 움직이지 않습니다: `DB_DWR` 은 계속 A~S(`Folder Link` 가 S)이고, `DB_DRQ` 의 새 열은 `Folder Link`(P)와 `Ext1` / `Ext2`(Q, R) 바로 뒤에 옵니다.
+
+- 새 행을 처음 쓰기 전에 DB 탭의 머리글 칸(`DB_DWR` 은 `T1`, `DB_DRQ` 는 `S1`)을 확인합니다: 비어 있으면 `Status (C/P)` 를 채우고, 같은 머리글이면 그대로 두며, **다른 머리글이면 그 큐를 중단**합니다(`✗ Could not process queue ...`). 값이 다른 열 아래에 들어가지 않게 하기 위함입니다.
+- 이미 DB 에 있는 행에는 C/P 가 없습니다. `--backfill-cp` 로 채우세요(Drive / Gemini 호출 없음, `GEMINI_API_KEY` 불필요):
+
+```powershell
+python migrate_queue.py --backfill-cp --dry-run     # 계획: 몇 칸을 채울지(C / P), 맞추지 못하는 행이 몇 개인지
+python migrate_queue.py --backfill-cp               # 두 DB 탭 모두 채우기
+python migrate_queue.py --backfill-cp --queue dwr   # 한 탭만
+```
+
+  DB 의 각 행을 **같은 PDF**(PDF Link 열의 Drive 파일 ID)의 큐 행과 맞춥니다. 이미 C/P 가 있는 칸은 바꾸지 않고, PDF 가 큐에 없는 행은 비워 두며, 큐에서 같은 PDF 의 C/P 가 **서로 다르면**(예: 한 행은 C, 다른 행은 P) 추측하지 않고 건너뜁니다. 콘솔에 경우별 개수가 표시됩니다. 다시 실행해도 안전하며 아직 빈 칸만 채웁니다. `--extract`, `--only-rows`, `--check-access` 와 함께 쓸 수 없습니다.
+
 ## `--check-access` 가 확인하는 것
 
 처리 대기 중인 각 행에서 PDF URL 열의 file ID 를 추출하고, 서비스 계정 권한으로 Drive 에 파일 메타데이터(이름, 형식, 크기, 휴지통 여부)를 요청합니다.
@@ -168,6 +183,7 @@ migrator/
   sheets.py drive.py gemini.py     the three APIs
   reports.py            parsing Gemini's JSON, building the DB rows
   extract.py            --extract (legacy_sheet.py reads, queue_writer.py writes / merges)
+  cp_column.py          the C/P column of the DB tabs (T in DB_DWR, S in DB_DRQ): header check, --backfill-cp
   stamps.py             the refresh time (I1:I2) and the migration time (K1:K2) in the queue sheet
   specs.py config.py models.py utils.py clock.py
 tests/                  one test file per module + fakes.py / legacy_fakes.py

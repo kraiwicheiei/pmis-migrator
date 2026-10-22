@@ -17,7 +17,7 @@ from tests.fakes import DWR_JSON, rep_json
 
 def test_build_db_row_matches_apps_script_layout():
     row = build_db_row(SPECS["dwr"], DWR_JSON, "PDF", "FOLDER")
-    assert len(row) == 19
+    assert len(row) == 20 and row[19] == ""                       # the C/P column (T) is empty unless a value is given
     assert row[0] == "" and row[1] == "ACME-DWR-X" and row[8] == 28 and row[9] == 6
     # 공백 없는 JSON.stringify 형식
     # [TH] JSON.stringify แบบไม่มีช่องว่าง
@@ -25,7 +25,16 @@ def test_build_db_row_matches_apps_script_layout():
     assert row[10] == '[{"role":"CM","count":10}]'
     assert row[13] == "" and row[16] == "AI Migrated" and row[17] == "PDF" and row[18] == "FOLDER"
     drq = build_db_row(SPECS["drq"], {"DRQ_No": "D1", "Comments": "=SUM(1)"}, "P", "F")
-    assert len(drq) == 18 and drq[1] == "D1" and drq[12] == "'=SUM(1)" and drq[13] == "AI Migrated" and drq[14] == "P" and drq[17] == ""
+    assert len(drq) == 19 and drq[1] == "D1" and drq[12] == "'=SUM(1)" and drq[13] == "AI Migrated" and drq[14] == "P" and drq[17] == ""
+    assert drq[18] == ""                                          # S = C/P (empty unless a value is given)
+
+
+def test_build_db_row_puts_the_queue_cp_value_in_column_t_of_dwr_and_s_of_drq():
+    assert SPECS["dwr"].db_cp_col == 19 and SPECS["drq"].db_cp_col == 18                    # T and S
+    dwr = build_db_row(SPECS["dwr"], DWR_JSON, "PDF", "FOLDER", "C")
+    assert dwr[19] == "C" and dwr[17] == "PDF" and dwr[18] == "FOLDER"                      # the existing columns do not move
+    drq = build_db_row(SPECS["drq"], {"DRQ_No": "D1"}, "P", "F", "P")
+    assert len(drq) == 19 and drq[18] == "P" and drq[14] == "P" and drq[15] == "F" and drq[16] == drq[17] == ""      # Ext1 / Ext2 (Q, R) stay empty
 
 
 def test_parse_model_json_and_row_spec():

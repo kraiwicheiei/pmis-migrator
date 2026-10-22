@@ -76,6 +76,9 @@ class FakeWorld:
         # 마이그레이션 시각(K1:K2): 쓴 값 목록 / 실패 시뮬레이션 / [TH] เวลา migration (K1:K2): ค่าที่เขียน / จำลองให้ล้มเหลว / [EN] The migration time (K1:K2): the values written / simulate a failure
         self.migration_time = []
         self.fail_migration_time = False
+        # DB 탭의 C/P 열 머리글(DWR 은 T1, DRQ 는 S1) 현재 값 / [TH] ค่าปัจจุบันของหัวตารางคอลัมน์ C/P (T1) ในแท็บ DB / [EN] The current value of the header (T1) of the C/P column of the DB tab
+        self.cp_header = ""
+        self.cp_header_writes = []
         self.lock = threading.Lock()
 
     # --- sheets session ---
@@ -87,7 +90,16 @@ class FakeWorld:
                 return Resp(200, {"values": self.queue})
             if a1.startswith("'DB_DWR'!R2"):
                 return Resp(200, {"values": [[r[17]] for r in self.db[1:] if len(r) > 17]})
+            if a1 in ("'DB_DWR'!T1", "'DB_DRQ'!S1"):
+                return Resp(200, {"values": [[self.cp_header]]} if self.cp_header else {})
+            if a1 == "'DB_DWR'!A1:T":
+                return Resp(200, {"values": self.db})
             raise AssertionError(a1)
+        if method == "PUT" and (path.endswith("!T1") or path.endswith("!S1")):
+            assert kw["params"]["valueInputOption"] == "RAW"
+            self.cp_header = kw["json"]["values"][0][0]
+            self.cp_header_writes.append(self.cp_header)
+            return Resp(200, {})
         if method == "PUT" and path.endswith("!K1:K2"):
             assert kw["params"]["valueInputOption"] == "RAW"
             if self.fail_migration_time:
@@ -105,10 +117,18 @@ class FakeWorld:
         if method == "POST" and path.endswith("values:batchUpdate"):
             self.batch_updates.append(kw["json"]["data"])
             for item in kw["json"]["data"]:
-                row = int(re.search(r"!G(\d+)$", item["range"]).group(1))
-                while len(self.queue[row - 1]) < 7:
-                    self.queue[row - 1].append("")
-                self.queue[row - 1][6] = item["values"][0][0]
+                m = re.fullmatch(r"'(.+)'!([GTS])(\d+)", item["range"])
+                tab, col, row = m.group(1), m.group(2), int(m.group(3))
+                if col == "G":                                   # the status column of the queue sheet
+                    assert tab.startswith("MIGRATION_QUEUE")
+                    while len(self.queue[row - 1]) < 7:
+                        self.queue[row - 1].append("")
+                    self.queue[row - 1][6] = item["values"][0][0]
+                else:                                            # the C/P column of a DB tab (T for DB_DWR, S for DB_DRQ)
+                    assert tab.startswith("DB_")
+                    while len(self.db[row - 1]) < 20:
+                        self.db[row - 1].append("")
+                    self.db[row - 1][19] = item["values"][0][0]
             return Resp(200, {})
         raise AssertionError((method, url))
 

@@ -89,6 +89,7 @@ Apps Script(extractDriveFileForAI)와 동일하게 맞춘 점 / [TH] ส่ว�
     sheets.py / drive.py / gemini.py   the three APIs
     reports.py      parsing Gemini's JSON answers, building the DB rows
     extract.py      --extract (legacy_sheet.py reads the legacy sheet, queue_writer.py writes / merges the queue)
+    cp_column.py    the C/P column of the DB tabs (T in DB_DWR, S in DB_DRQ): header check, --backfill-cp
     stamps.py       the refresh time (I1:I2) and the migration time (K1:K2) written to the queue sheet
     specs.py / config.py / models.py / utils.py / clock.py   queue definitions, constants, data structures, helpers, time
   테스트는 tests/ / [TH] เทสต์อยู่ใน tests/ / [EN] Tests are in tests/:  python -m pytest -q

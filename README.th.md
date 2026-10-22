@@ -92,6 +92,21 @@ python migrate_queue.py --extract --queue drq   # เฉพาะคิวเด
 - ต่างจาก Apps Script: ค่าในคิวเขียนเป็นข้อความล้วน (`RAW`) วันที่ ตัวเลข และเลข 0 นำหน้าจึงไม่ถูกแปลง ล้างเฉพาะค่าในชีตคิว (รูปแบบเดิมยังอยู่) และเพิ่มแถวด้วย append ชีตจึงขยายเอง
 - service account ต้องมีสิทธิ์ **Editor** ในสเปรดชีต (อ่านแท็บเก่า เขียนแท็บคิว) ไฟล์ PDF ไม่ถูกแตะ
 
+## C/P ใน DB: คอลัมน์ `T` (DWR) / `S` (DRQ) และ `--backfill-cp`
+
+ทุกแถวที่ migration เขียนลง `DB_DWR` / `DB_DRQ` จะมีค่า **C/P** ของแถวในคิว (คอลัมน์ F `Status(C/P)`) ติดไปด้วย คัดลอกตามเดิม ลงที่ **คอลัมน์ T ของ `DB_DWR`** และ **คอลัมน์ S ของ `DB_DRQ`** (หัวตาราง `Status (C/P)` ทั้งคู่) คอลัมน์เดิมไม่ขยับ: `DB_DWR` ยังเป็น A-S (`Folder Link` คือ S) ส่วน `DB_DRQ` คอลัมน์ใหม่อยู่ต่อจาก `Folder Link` (P) และ `Ext1` / `Ext2` (Q, R)
+
+- ก่อนเขียนแถวใหม่แถวแรก สคริปต์จะดูเซลล์หัวตาราง (`T1` ใน `DB_DWR`, `S1` ใน `DB_DRQ`) ของแท็บ DB: ถ้าว่างจะเติม `Status (C/P)` ให้ ถ้าเป็นหัวเดียวกันก็คงไว้ **ถ้าเป็นหัวอื่นจะหยุดคิวนั้น** (`✗ Could not process queue ...`) เพื่อไม่ให้ค่าไปลงใต้คอลัมน์อื่น
+- แถวที่อยู่ใน DB แล้วยังไม่มี C/P เติมได้ด้วย `--backfill-cp` (ไม่เรียก Drive / Gemini ไม่ต้องใช้ `GEMINI_API_KEY`):
+
+```powershell
+python migrate_queue.py --backfill-cp --dry-run     # ดูแผน: จะเติมกี่เซลล์ (C / P) และจับคู่ไม่ได้กี่แถว
+python migrate_queue.py --backfill-cp               # เติมทั้งสองแท็บ DB
+python migrate_queue.py --backfill-cp --queue dwr   # เฉพาะแท็บเดียว
+```
+
+  แต่ละแถวใน DB จะจับคู่กับแถวในคิวที่ใช้ **PDF เดียวกัน** (Drive file ID ในคอลัมน์ PDF Link) เซลล์ที่มี C/P อยู่แล้วจะไม่ถูกแก้ แถวที่ PDF ไม่อยู่ในคิวจะปล่อยว่าง และ PDF ที่ในคิวมี C/P **ต่างกัน** (เช่นแถวหนึ่งเป็น C อีกแถวเป็น P) จะข้ามไม่เดา คอนโซลรายงานจำนวนของแต่ละกรณี สั่งซ้ำได้: จะเติมเฉพาะเซลล์ที่ยังว่าง ใช้ร่วมกับ `--extract`, `--only-rows` หรือ `--check-access` ไม่ได้
+
 ## `--check-access` เช็คอะไร
 
 สำหรับแต่ละแถวที่รอทำ จะดึง file ID จากคอลัมน์ PDF URL แล้วขอ metadata ของไฟล์จาก Drive (ชื่อ, ชนิด, ขนาด, อยู่ในถังขยะหรือไม่) ด้วยสิทธิ์ของ service account
@@ -168,6 +183,7 @@ migrator/
   sheets.py drive.py gemini.py     the three APIs
   reports.py            parsing Gemini's JSON, building the DB rows
   extract.py            --extract (legacy_sheet.py reads, queue_writer.py writes / merges)
+  cp_column.py          the C/P column of the DB tabs (T in DB_DWR, S in DB_DRQ): header check, --backfill-cp
   stamps.py             the refresh time (I1:I2) and the migration time (K1:K2) in the queue sheet
   specs.py config.py models.py utils.py clock.py
 tests/                  one test file per module + fakes.py / legacy_fakes.py

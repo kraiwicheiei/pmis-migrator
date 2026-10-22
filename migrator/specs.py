@@ -30,20 +30,31 @@ SINGLE_REPORT_HINT = (
 )
 
 
+# DB 탭의 C/P 열 머리글 (DB_DWR 은 T열, DB_DRQ 는 S열)
+# [TH] หัวตารางของคอลัมน์ C/P ในแท็บ DB (DB_DWR คอลัมน์ T, DB_DRQ คอลัมน์ S)
+# [EN] The header of the C/P column of the DB tabs (column T in DB_DWR, column S in DB_DRQ)
+DB_CP_HEADER = "Status (C/P)"
+
+
 @dataclass(frozen=True)
 class QueueSpec:
     name: str
     queue_tab: str
     db_tab: str
     prompt: str
-    # DB 의 각 열: ("const", 값) | ("field", 키 이름) | ("json", 키 이름) | ("pdf",) | ("folder",)
-    # [TH] แต่ละคอลัมน์ของ DB: ("const", ค่า) | ("field", ชื่อคีย์) | ("json", ชื่อคีย์) | ("pdf",) | ("folder",)
-    # [EN] Each DB column: ("const", value) | ("field", key name) | ("json", key name) | ("pdf",) | ("folder",)
+    # DB 의 각 열: ("const", 값) | ("field", 키 이름) | ("json", 키 이름) | ("pdf",) | ("folder",) | ("cp",)
+    # [TH] แต่ละคอลัมน์ของ DB: ("const", ค่า) | ("field", ชื่อคีย์) | ("json", ชื่อคีย์) | ("pdf",) | ("folder",) | ("cp",)
+    # [EN] Each DB column: ("const", value) | ("field", key name) | ("json", key name) | ("pdf",) | ("folder",) | ("cp",)
+    # ("cp",) = 큐 시트 F열(Status(C/P))의 값 / [TH] ค่าจากคอลัมน์ F (Status(C/P)) ของชีตคิว / [EN] the value of column F (Status(C/P)) of the queue sheet
     columns: tuple
     # DB 에서 PDF Link 열의 인덱스(0부터). 중복 확인에 사용
     # [TH] index (เริ่ม 0) ของคอลัมน์ PDF Link ใน DB ใช้เช็คข้อมูลซ้ำ
     # [EN] 0-based index of the PDF Link column in the DB; used for the duplicate check
     db_pdf_col: int
+    # DB 에서 C/P 열의 인덱스(0부터). 기존 열 바로 뒤: DB_DWR 은 T열(index 19), DB_DRQ 는 S열(index 18)
+    # [TH] index (เริ่ม 0) ของคอลัมน์ C/P ใน DB ต่อจากคอลัมน์เดิมทันที: DB_DWR คือคอลัมน์ T (index 19), DB_DRQ คือคอลัมน์ S (index 18)
+    # [EN] 0-based index of the C/P column in the DB, right after the existing columns: column T (index 19) in DB_DWR, column S (index 18) in DB_DRQ
+    db_cp_col: int
     # AI JSON 에서 문서 번호가 들어 있는 키 (여러 보고서가 돌아왔을 때 큐의 Doc No 와 맞춰 고르는 데 사용)
     # [TH] คีย์ใน JSON ของ AI ที่เก็บเลขเอกสาร (ใช้จับคู่กับ Doc No ของคิวเมื่อ AI ตอบกลับมาหลายรายงาน)
     # [EN] Key in the AI JSON that holds the document number (used to match the queue's Doc No when the AI returns several reports)
@@ -67,9 +78,10 @@ SPECS = {
             ("field", "Total_Manpower"), ("field", "Total_Equipment"),
             ("json", "Manpower_Details"), ("json", "Equipment_Details"),
             ("field", "Activities"), ("field", "Issues_Delays"), ("field", "AI_Risk_Flag"),
-            ("field", "Linked_RITs"), ("const", "AI Migrated"), ("pdf",), ("folder",),
+            ("field", "Linked_RITs"), ("const", "AI Migrated"), ("pdf",), ("folder",), ("cp",),
         ),
         db_pdf_col=17,
+        db_cp_col=19,
         no_key="DWR_No",
         # E열(index 4) ~ BD열(index 55)
         # [TH] คอลัมน์ E (index 4) ถึง BD (index 55)
@@ -87,9 +99,10 @@ SPECS = {
             ("field", "Location"), ("field", "WBS"), ("field", "Time"), ("field", "Shift"),
             ("field", "Activities"), ("field", "Unit_Quantity"), ("field", "Linked_RITs"),
             ("field", "Approved_by"), ("field", "Comments"), ("const", "AI Migrated"),
-            ("pdf",), ("folder",), ("const", ""), ("const", ""),
+            ("pdf",), ("folder",), ("const", ""), ("const", ""), ("cp",),
         ),
         db_pdf_col=14,
+        db_cp_col=18,
         no_key="DRQ_No",
         # E열(index 4) ~ BF열(index 57)
         # [TH] คอลัมน์ E (index 4) ถึง BF (index 57)

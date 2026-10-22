@@ -22,6 +22,8 @@ _CUT: list[tuple[re.Pattern, str]] = [
     (re.compile(r"^(⚠ The run finished, but the migration time could not be written).*$"), r"\1 (run locally for the reason)"),
     (re.compile(r"^(Stopped early: Gemini answered [^:]+):.*$"), r"\1"),
     (re.compile(r"^(\d+ rows are already in DB_[A-Z]+ -> marked Done without calling the AI) \(rows: .*\)$"), r"\1"),
+    (re.compile(r"^(===== Backfill C/P \w+: [A-Z_]+ <- [A-Z_]+)( \| sheet: .*)? =====$"), r"\1 ====="),
+    (re.compile(r"^(✗ Could not backfill C/P in DB_[A-Z]+):.*$"), r"\1 - run the script locally for the reason"),
 ]
 
 # 그대로 출력하는 줄의 시작 부분
@@ -30,10 +32,11 @@ _CUT: list[tuple[re.Pattern, str]] = [
 _KEEP = re.compile(
     r"^(?:"
     r"Queue [A-Z_]+: |Rows to process|Finished:|All queues|Of the Done rows|Stopped early|Gemini calls:"
-    r"|Migration time written to|\(dry-run|\[[A-Z_]+\] Reachable"
+    r"|Migration time written to|\(dry-run|\[[A-Z_]+\] Reachable|\[[A-Z]+\] Backfill C/P in DB_[A-Z]+: "
     r"|  (?:✓ Wrote queue|✓ Merged into [A-Z_]+: |ℹ \d+ Done rows have a different PDF link|✓ Refresh time written to [A-Z_]+!I2"
     r"|⚠ \d+ items have no PDF link|⚠ skipped \d+ cells|⚠ --overwrite: |No items found"
-    r"|✗ The header row of [A-Z_]+ is not the expected one|\(--dry-run\) nothing was written)"
+    r"|✗ The header row of [A-Z_]+ is not the expected one|\(--dry-run\) nothing was written"
+    r"|✓ Filled C/P in DB_[A-Z]+![A-Z]+: |✓ Wrote the header 'Status \(C/P\)' to DB_[A-Z]+![A-Z]+1)"
     r"|    Fix the header"
     r")"
 )

@@ -25,6 +25,10 @@ class Job:
     # [TH] คอลัมน์ A ของชีตคิว (Doc No)
     # [EN] Column A of the queue sheet (Doc No)
     doc_no: str = ""
+    # 큐 시트 F열 (Status(C/P)): DB 의 C/P 열에 그대로 기록
+    # [TH] คอลัมน์ F ของชีตคิว (Status(C/P)) เขียนลงคอลัมน์ C/P ของ DB ตามเดิม
+    # [EN] Column F of the queue sheet (Status(C/P)): written as it is to the C/P column of the DB
+    cp: str = ""
 
 
 @dataclass
