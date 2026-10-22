@@ -101,6 +101,7 @@ class FakeLegacy:
         self.refresh = {}
         self.refresh_error = False
         self.updated_rows = []
+        self.renamed_rows = []
         self.row_count = row_count
         self.events = []
         self.grid_reads = []
@@ -147,13 +148,18 @@ class FakeLegacy:
         if method == "POST" and path == base + "/values:batchUpdate":
             assert kw["json"]["valueInputOption"] == "RAW"
             for item in kw["json"]["data"]:
-                m = re.fullmatch(r"'(.+)'!B(\d+):F(\d+)", item["range"])
-                tab, row = m.group(1), int(m.group(2))
-                assert m.group(2) == m.group(3)                      # one row per range; column G is never written
+                m = re.fullmatch(r"'(.+)'!(?:A(\d+)|B(\d+):F(\d+))", item["range"])
+                tab = m.group(1)
+                row = int(m.group(2) or m.group(3))
+                assert m.group(2) or m.group(3) == m.group(4)        # one row per range; column G is never written
                 cells = self.queues[tab][row - 1]
                 cells.extend([""] * (7 - len(cells)))
-                cells[1:6] = item["values"][0]
-                self.updated_rows.append((tab, row))
+                if m.group(2):                                       # column A: a renumbered Doc No
+                    cells[0] = item["values"][0][0]
+                    self.renamed_rows.append((tab, row))
+                else:                                                # columns B..F
+                    cells[1:6] = item["values"][0]
+                    self.updated_rows.append((tab, row))
                 self.written += item["values"]
             self.events.append(("update", tab, len(kw["json"]["data"])))
             return Resp(200, {})

@@ -61,7 +61,7 @@ def test_sanitize_cuts_names_ids_and_error_details():
 def test_sanitize_drops_everything_else():
     for line in ("service account: sa@x | sheet: Example Spreadsheet (SID) | model: m", "  row 2: fileId=abc | previous status='Waiting'",
                  "  sample: R-001-CIV-001 | 2025-11-28 | CIV | C | PDF link: yes", "  ✗ row 2: Error: Drive Access | fileId=abc | x", "", "-" * 60,
-                 "  ✓ 3 rows -> DB_DWR (queue rows [2, 3, 4])", "[DWR] Legacy spreadsheet: Legacy Spreadsheet (ID) -> queue is written to the target spreadsheet (SID)"):
+                 "  ✓ 3 rows -> DB_DWR (queue rows [2, 3, 4])", "  sample (renumbered): row 2: R-001-CIV-001 -> R-777-CIV-001", "[DWR] Legacy spreadsheet: Legacy Spreadsheet (ID) -> queue is written to the target spreadsheet (SID)"):
         assert sanitize(line) is None
 
 

@@ -106,6 +106,10 @@ class LegacyItem:
     pdf_url: str
     folder_url: str
     completed: bool
+    # 칸의 값 (Doc No = A열 + "-" + Discipline + "-" + 이 값). A열(No.)이 바뀌어도 (Date, Discipline, 이 값)은 같은 항목을 가리킴
+    # [TH] ค่าในช่อง (Doc No = คอลัมน์ A + "-" + Discipline + "-" + ค่านี้) ถ้าคอลัมน์ A (No.) เปลี่ยน (Date, Discipline, ค่านี้) ก็ยังชี้รายการเดิม
+    # [EN] The cell value (Doc No = column A + "-" + Discipline + "-" + this value). When column A (No.) changes, (Date, Discipline, this value) still identifies the same item
+    key_text: str = ""
 
     def to_row(self) -> list:
         return [self.doc_no, self.date, self.discipline, self.pdf_url, self.folder_url, "C" if self.completed else "P", "Waiting"]
@@ -166,7 +170,7 @@ def build_queue_items(header_cells: list, data_rows: Any, end_col: int) -> tuple
             key = f"{date_text}_{discipline}_{text}"
             item = queue.get(key)
             if item is None:
-                queue[key] = LegacyItem(f"{base_no}-{discipline}-{text}", date_text, discipline, pdf_url, folder_url, completed)
+                queue[key] = LegacyItem(f"{base_no}-{discipline}-{text}", date_text, discipline, pdf_url, folder_url, completed, text)
             else:
                 stats.merged += 1
                 if completed:

@@ -29,6 +29,7 @@ class ExtractSummary:
     refreshed_at: str = ""
     # 합치기(merge) 결과 / [TH] ผลของการรวม (merge) / [EN] Result of a merge
     added: int = 0
+    renumbered: int = 0
     updated: int = 0
     unchanged: int = 0
     kept_done: int = 0
@@ -113,12 +114,17 @@ def extract_queue(args: argparse.Namespace, clients: Clients, key: str, log: Cal
             return summary
         plan = plan_merge(existing, items)
         summary.added, summary.updated, summary.unchanged, summary.kept_done = len(plan.new_items), len(plan.updates), plan.unchanged, plan.kept_done
+        summary.renumbered = len(plan.renamed)
         if plan.done_link_differs:
             log(f"  ℹ {plan.done_link_differs} Done rows have a different PDF link in the legacy sheet (kept as is)")
         counts = f"+{len(plan.new_items)} new, {len(plan.updates)} updated, {plan.unchanged} unchanged, {plan.kept_done} Done kept as is"
+        if plan.renamed:
+            counts += f", {len(plan.renamed)} renumbered (Doc No changed because column A of the legacy sheet changed)"
         if plan.missing:
             counts += f", {plan.missing} not in the legacy sheet any more (left alone)"
         if args.dry_run:
+            for number in sorted(plan.renamed)[:5]:
+                log(f"  sample (renumbered): row {number}: {plan.old_names[number]} -> {plan.renamed[number]}")
             for it in plan.new_items[:5]:
                 log(f"  sample (new): {it.doc_no} | {it.date} | {it.discipline} | {'C' if it.completed else 'P'} | PDF link: {'yes' if it.pdf_url else 'no'}")
             log(f"  (--dry-run) nothing was written: would merge into {spec.queue_tab}: {counts}")

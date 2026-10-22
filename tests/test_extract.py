@@ -246,3 +246,81 @@ def test_the_refresh_time_cells_are_outside_the_queue_columns():
     w = FakeLegacy(legacy_sid=LEGACY_FILE)
     extract_logs(w, legacy_spreadsheet_id=LEGACY_FILE)
     assert w.refresh["MIGRATION_QUEUE"][1] == STAMP and all(STAMP not in str(r) for r in w.queues["MIGRATION_QUEUE"])
+
+
+# --- 옛 시트의 A열(No.)이 바뀐 경우 / the legacy "No." changes / เมื่อ No. ของชีตต้นทางเปลี่ยน ---
+def renumbered_world():
+    """큐를 한 번 만든 뒤 옛 시트 첫 데이터 행의 No. 를 R-001 -> R-777 로 바꾼 세계 / [TH] สร้างคิวครั้งแรกแล้วเปลี่ยน No. ของแถวข้อมูลแถวแรกในชีตเก่าจาก R-001 เป็น R-777
+    [EN] A world where the queue was built once and then the No. of the first legacy data row changed from R-001 to R-777"""
+    grid = legacy_grid()
+    w = FakeLegacy(grids={"LEGACY-DWR": grid, "LEGACY-DRQ": legacy_grid()})
+    extract_logs(w)
+    queue = w.queues["MIGRATION_QUEUE"]
+    queue[1][6], queue[1][3] = "Done", URL(99)                      # the first item is Done and its link differs from the legacy one
+    queue[2][6] = "Error: Drive Access | x"
+    grid[4][0] = txt("R-777")
+    w.events.clear()
+    return w
+
+
+def test_a_changed_no_in_the_legacy_sheet_renames_the_doc_no_of_the_same_items():
+    w = renumbered_world()
+    queue = w.queues["MIGRATION_QUEUE"]
+    statuses = [r[6] for r in queue[1:]]
+    summary, logs = extract_logs(w)
+    assert [r[0] for r in queue[1:]] == ["R-777-CIV-001", "R-777-ELE-5", "R-777-REM (DMS)-9", "R-003-CIV-003"]
+    assert len(queue) == 5 and [r[6] for r in queue[1:]] == statuses                       # no duplicate rows, every status is kept
+    assert queue[1][3] == URL(99)                                                          # Done: only the Doc No changed, the link is kept
+    assert summary.renumbered == 3 and summary.added == 0 and w.renamed_rows == [("MIGRATION_QUEUE", 2), ("MIGRATION_QUEUE", 3), ("MIGRATION_QUEUE", 4)]
+    assert any("3 renumbered (Doc No changed because column A of the legacy sheet changed)" in m for m in logs)
+    again, _ = extract_logs(w)                                                             # nothing left to rename
+    assert again.renumbered == 0 and again.added == 0 and [r[0] for r in queue[1:]][0] == "R-777-CIV-001"
+
+
+def test_a_renamed_row_that_is_not_done_also_gets_the_new_legacy_data():
+    w = renumbered_world()
+    queue = w.queues["MIGRATION_QUEUE"]
+    queue[3][6] = "Waiting"
+    queue[3][3] = URL(55)                                                                  # a stale link on a Waiting row
+    extract_logs(w)
+    assert queue[3][0] == "R-777-REM (DMS)-9" and queue[3][3] == "" and queue[3][6] == "Waiting"      # Doc No and B..F follow the legacy sheet, G stays
+
+
+def test_renumber_dry_run_reports_the_plan_and_writes_nothing():
+    w = renumbered_world()
+    before = [list(r) for r in w.queues["MIGRATION_QUEUE"]]
+    summary, logs = extract_logs(w, dry_run=True)
+    assert w.queues["MIGRATION_QUEUE"] == before and w.events == [] and summary.renumbered == 3
+    assert any("sample (renumbered): row 2: R-001-CIV-001 -> R-777-CIV-001" in m for m in logs)
+    assert any("would merge into MIGRATION_QUEUE" in m and "3 renumbered" in m for m in logs)
+
+
+def test_a_changed_date_is_still_a_new_item_and_an_unknown_cell_text_never_renames():
+    existing = [QUEUE_HEADER, ["R-1-CIV-001", "2025-01-01", "CIV", "", "", "P", "Waiting"]]
+    same_item_new_no = LegacyItem("R-2-CIV-001", "2025-01-01", "CIV", "", "", False, "001")
+    other_date = LegacyItem("R-2-CIV-001", "2025-01-02", "CIV", "", "", False, "001")
+    other_text = LegacyItem("R-2-CIV-002", "2025-01-01", "CIV", "", "", False, "002")
+    no_text = LegacyItem("R-2-CIV-001", "2025-01-01", "CIV", "", "", False)                 # built by hand without the cell text
+    plan = plan_merge(existing, [same_item_new_no])
+    assert plan.renamed == {2: "R-2-CIV-001"} and plan.old_names == {2: "R-1-CIV-001"} and plan.new_items == [] and plan.missing == 0
+    for item in (other_date, other_text, no_text):
+        plan = plan_merge(existing, [item])
+        assert plan.renamed == {} and plan.new_items == [item] and plan.missing == 1
+
+
+def test_one_queue_row_is_never_claimed_by_two_items():
+    existing = [QUEUE_HEADER, ["R-1-CIV-001", "2025-01-01", "CIV", "", "", "P", "Waiting"]]
+    a = LegacyItem("R-2-CIV-001", "2025-01-01", "CIV", "", "", False, "001")
+    b = LegacyItem("R-3-CIV-001", "2025-01-01", "CIV", "", "", False, "001")
+    plan = plan_merge(existing, [a, b])
+    assert plan.renamed == {2: "R-2-CIV-001"} and plan.new_items == [b]
+
+
+def test_apply_merge_writes_a_renamed_doc_no_and_the_other_columns_separately(monkeypatch):
+    monkeypatch.setattr(queue_writer, "EXTRACT_UPDATES_PER_WRITE", 2)
+    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(QUEUE_HEADER)] + [[f"D{i}", "d", "CIV", "", "", "P", "Waiting"] for i in range(3)]})
+    plan = MergePlan(renamed={2: "N2", 3: "N3"}, updates={3: ["d2", "CIV", "u", "", "C"]})
+    apply_merge(w.clients().sheets, "SID", "MIGRATION_QUEUE", plan)
+    rows = w.queues["MIGRATION_QUEUE"]
+    assert [r[0] for r in rows[1:]] == ["N2", "N3", "D2"] and rows[2][1:6] == ["d2", "CIV", "u", "", "C"] and rows[2][6] == "Waiting"
+    assert [e[2] for e in w.events if e[0] == "update"] == [2, 1]                          # three writes, two per request
