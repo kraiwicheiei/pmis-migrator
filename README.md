@@ -148,6 +148,24 @@ To run: Actions tab > **Migrate queue** > Run workflow, then choose `mode`: `dry
 - At the end of a run it prints token usage and an estimated cost (list price).
 - Code comments are written in three languages (Korean / `[TH]` / `[EN]`); console output (log lines, `--help`) and the text written into the sheet's Error cells are in English.
 
+## Project layout
+
+The code is split by job; `migrate_queue.py` is only the entry point, so every command in this guide is unchanged. `python -m migrator` works too.
+
+```text
+migrate_queue.py        entry point (python migrate_queue.py ...)
+migrator/
+  cli.py                options, building the clients, main()
+  settings.py           settings from the environment / .env
+  runner.py             choosing the rows + the main loop
+  processing.py         one row: Drive PDF -> Gemini -> DB row
+  sheets.py drive.py gemini.py     the three APIs
+  reports.py            parsing Gemini's JSON, building the DB rows
+  extract.py            --extract (legacy_sheet.py reads, queue_writer.py writes / merges)
+  specs.py config.py models.py utils.py clock.py
+tests/                  one test file per module + fakes.py / legacy_fakes.py
+```
+
 ## Tests
 
 ```powershell

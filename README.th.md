@@ -148,6 +148,24 @@ gh secret set PMIS_SPREADSHEET_ID                                               
 - จบรอบจะสรุปจำนวน token และค่าใช้จ่ายโดยประมาณ (ราคา list price)
 - คอมเมนต์ในโค้ดมี 3 ภาษา (เกาหลี / `[TH]` / `[EN]`) ส่วนข้อความที่แสดงตอนรัน (log, `--help`) และข้อความที่เขียนลงเซลล์ Error ในชีตเป็นภาษาอังกฤษ
 
+## โครงสร้างโปรเจกต์
+
+โค้ดแยกตามหน้าที่ `migrate_queue.py` เป็นแค่จุดเริ่มต้น คำสั่งทุกอันในคู่มือนี้จึงใช้เหมือนเดิม และรันด้วย `python -m migrator` ได้ด้วย
+
+```text
+migrate_queue.py        entry point (python migrate_queue.py ...)
+migrator/
+  cli.py                options, building the clients, main()
+  settings.py           settings from the environment / .env
+  runner.py             choosing the rows + the main loop
+  processing.py         one row: Drive PDF -> Gemini -> DB row
+  sheets.py drive.py gemini.py     the three APIs
+  reports.py            parsing Gemini's JSON, building the DB rows
+  extract.py            --extract (legacy_sheet.py reads, queue_writer.py writes / merges)
+  specs.py config.py models.py utils.py clock.py
+tests/                  one test file per module + fakes.py / legacy_fakes.py
+```
+
 ## เทสต์
 
 ```powershell
