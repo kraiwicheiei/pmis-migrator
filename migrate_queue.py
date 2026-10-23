@@ -88,7 +88,8 @@ Apps Script(extractDriveFileForAI)와 동일하게 맞춘 점 / [TH] ส่ว�
     processing.py   one row: Drive PDF -> Gemini -> DB row
     sheets.py / drive.py / gemini.py   the three APIs
     reports.py      parsing Gemini's JSON answers, building the DB rows
-    extract.py      --extract (legacy_sheet.py reads the legacy sheet, queue_writer.py writes / merges the queue)
+    extract.py      --extract (legacy_sheet.py reads the legacy sheet, queue_writer.py writes / syncs the queue)
+    db_sync.py      --sync-db (remove the synced DB rows that left the queue, update C/P, tag the rows that match the legacy sheet) and replacing a DB row in place
     cp_column.py    the C/P column of the DB tabs (T in DB_DWR, S in DB_DRQ): header check, --backfill-cp
     stamps.py       the refresh time (I1:I2) and the migration time (K1:K2) written to the queue sheet
     specs.py / config.py / models.py / utils.py / clock.py   queue definitions, constants, data structures, helpers, time

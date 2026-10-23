@@ -12,6 +12,7 @@ from typing import Optional
 
 from .config import DEFAULT_API_VERSION, DEFAULT_MODEL, LARGE_PDF_MB, SCOPES
 from .cp_column import run_backfill
+from .db_sync import run_db_sync
 from .extract import run_extract
 from .models import Clients
 from .public_log import make_log
@@ -49,13 +50,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--check-access", action="store_true", help="check that the service account can open the PDF files (no Gemini calls, no sheet writes)")
     p.add_argument("--extract", action="store_true",
                    help="build the queues from the legacy sheets (replaces extractLegacyDwrLinks / extractLegacyDrqLinks); no Drive/Gemini calls; needs PMIS_LEGACY_DWR_SHEET / PMIS_LEGACY_DRQ_SHEET; works with --dry-run and --queue. "
-                        "A queue that already has rows is MERGED: statuses are kept, new items are appended, Waiting/Error rows get the legacy data (use --overwrite to rebuild instead)")
+                        "A queue that already has rows is SYNCED: every row is recomputed from the legacy sheet and the status of the existing row is kept (use --overwrite to rebuild with every row Waiting instead)")
     p.add_argument("--legacy-spreadsheet", default=None, metavar="ID_OR_URL",
                    help="with --extract: the spreadsheet file (ID or URL) that holds the legacy tabs; the queues are still written to PMIS_SPREADSHEET_ID. "
                         "Default: PMIS_LEGACY_SPREADSHEET_ID, or the same file as PMIS_SPREADSHEET_ID. Share it with the service account")
     p.add_argument("--backfill-cp", action="store_true",
                    help="fill the C/P column (T in DB_DWR, S in DB_DRQ) for the rows that are already there, matching each DB row with the queue row of the same PDF (Drive file ID); "
                         "rows that already have a C/P are never changed and conflicting values are skipped; no Drive/Gemini calls; works with --dry-run and --queue")
+    p.add_argument("--sync-db", action="store_true",
+                   help="make DB_DWR / DB_DRQ match the queue (= the legacy sheet): remove the DB rows whose PDF is not in the queue any more (only rows with Status 'AI Migrated' that were tagged 'Synced' before, so rows that never came from the legacy sheet stay; "
+                        "they are copied to a _REMOVED_<tab> tab first), update the C/P column to the queue's value, tag the rows whose PDF is in the queue with 'Synced' in the 'Legacy sync' column (an orphan row gets no tag), keep the rows that wait to be replaced by a changed PDF. "
+                        "Alone it reads the queue sheets; with --extract it runs right after each queue is synced (with --dry-run: on the planned rows). No Drive/Gemini calls. "
+                        "Works with --dry-run and --queue")
+    p.add_argument("--allow-large-removal", action="store_true",
+                   help="with --extract or --sync-db: allow removing more rows than the safety limit (the larger of 10%% of the rows and 100); without it a run that "
+                        "would remove more is refused, which protects the queue / DB when the legacy sheet is wrongly empty")
     p.add_argument("--public-log", action="store_true",
                    help="print only counts and statuses (no tab names, sheet names / IDs, Doc Nos or error details), so the output is safe in the Actions log of a public repository; run without it locally for the details")
     p.add_argument("--overwrite", action="store_true",
@@ -102,20 +111,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     # [EN] Checked first (a missing setting is reported before any key or network work)
     args.spreadsheet_id = require_spreadsheet_id()
     keys = queues_to_run(args.queue)
+    if args.sync_db and args.backfill_cp:
+        sys.exit("--sync-db already updates the C/P column: use either --sync-db or --backfill-cp, not both")
     if args.extract:
         if args.only_rows or args.check_access:
             sys.exit("--extract cannot be combined with --only-rows or --check-access")
+        if args.backfill_cp:
+            sys.exit("--backfill-cp cannot be combined with --extract (use --extract --sync-db)")
         args.legacy_tabs = require_legacy_sheet_names(keys)
         args.legacy_spreadsheet_id = resolve_legacy_spreadsheet_id(args.legacy_spreadsheet, args.spreadsheet_id)
-    elif args.backfill_cp and (args.only_rows or args.check_access):
-        sys.exit("--backfill-cp cannot be combined with --only-rows or --check-access")
+    elif (args.backfill_cp or args.sync_db) and (args.only_rows or args.check_access):
+        sys.exit("--backfill-cp / --sync-db cannot be combined with --only-rows or --check-access")
     elif args.overwrite:
         sys.exit("--overwrite only works together with --extract")
     elif args.legacy_spreadsheet:
         sys.exit("--legacy-spreadsheet only works together with --extract")
+    if args.allow_large_removal and not (args.extract or args.sync_db):
+        sys.exit("--allow-large-removal only works together with --extract or --sync-db")
     if args.only_rows and len(keys) > 1:
         sys.exit("--only-rows works with one queue: add --queue dwr or --queue drq (row numbers belong to that queue sheet)")
-    clients = make_clients(args, need_gemini=not (args.dry_run or args.check_access or args.extract or args.backfill_cp))
+    clients = make_clients(args, need_gemini=not (args.dry_run or args.check_access or args.extract or args.backfill_cp or args.sync_db))
     title, title_error = spreadsheet_title(clients.sheets, args.spreadsheet_id)
     if title:
         sheet_label = f"{title} ({args.spreadsheet_id})"
@@ -123,8 +138,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         sheet_label = f"{args.spreadsheet_id} (could not read the sheet name - check the ID and that the sheet is shared with the service account: {title_error})"
     log = make_log(args.public_log)
     if args.extract:
-        log(f"service account: {clients.sa_email} | sheet: {sheet_label} | mode: build the queues from the legacy sheets (--extract)")
+        log(f"service account: {clients.sa_email} | sheet: {sheet_label} | mode: build the queues from the legacy sheets (--extract)"
+            + (" and make the DB tabs match them (--sync-db)" if args.sync_db else ""))
         return run_extract(args, clients, keys, log=log, sheet_title=title)
+    if args.sync_db:
+        log(f"service account: {clients.sa_email} | sheet: {sheet_label} | mode: make the DB tabs match the queues (--sync-db)")
+        return run_db_sync(args, clients, keys, log=log, sheet_title=title)
     if args.backfill_cp:
         log(f"service account: {clients.sa_email} | sheet: {sheet_label} | mode: fill the C/P column of the DB tabs (--backfill-cp)")
         return run_backfill(args, clients, keys, log=log, sheet_title=title)

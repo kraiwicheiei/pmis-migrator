@@ -258,3 +258,86 @@ def test_a_failed_migration_time_write_does_not_change_the_result_of_the_run():
     s = run(ns(), w.clients(), log=logs.append)
     assert s.done == 2 and s.migrated_at == "" and w.migration_time == []
     assert any("The run finished, but the migration time could not be written to MIGRATION_QUEUE!K1:K2" in m for m in logs)
+
+
+# --- 바뀐 PDF 의 DB 행을 제자리에서 교체 / replacing the DB row of a changed PDF in place / แทนที่แถว DB ของ PDF ที่เปลี่ยนในที่เดิม ---
+OLD = 50                                                                            # the number of the old PDF (URL(50) / FID(50))
+
+
+def replace_world(statuses=("Waiting",), old_in_db=True, replaces=(OLD,)):
+    """
+    큐 행 2.. 는 새 PDF(URL(1)..), H열에 옛 file ID. DB 2행은 옛 PDF 로 쓴 행 (A열에 사람이 쓴 값이 있음)
+    [TH] แถวคิว 2.. ใช้ PDF ใหม่ (URL(1)..) และคอลัมน์ H เก็บ file ID เก่า แถว 2 ของ DB คือแถวที่เขียนจาก PDF เก่า (คอลัมน์ A มีค่าที่คนพิมพ์)
+    [EN] Queue rows 2.. use the new PDF (URL(1)..) and column H holds the old file ID. DB row 2 is the row written from the old PDF (column A holds a value a person typed)
+    """
+    w = world(list(statuses))
+    for row, old in zip(w.queue[1:], list(replaces) + [None] * len(statuses)):
+        if old:
+            row.append(FID(old))
+    if old_in_db:
+        old_row = build_db_row(SPECS["dwr"], {**DWR_JSON, "DWR_No": "OLD-VERSION"}, URL(OLD), FOLDER, "P")
+        old_row[0] = "CSC-REF-7"
+        w.db.append(old_row)
+    return w
+
+
+def test_a_changed_pdf_replaces_the_old_db_row_in_place():
+    w = replace_world()
+    logs = []
+    s = run(ns(), w.clients(), log=logs.append)
+    assert s.done == 1 and s.replaced == 1 and len(w.db) == 2 and w.appends == []                 # no new row at the end
+    row = w.db[1]
+    assert row[1] == "ACME-DWR-X" and row[17] == URL(1) and row[19] == "C"                         # the new data and the C/P of the queue row
+    assert row[0] == "CSC-REF-7" and row[20] == "Synced"                                         # a value in column A is never overwritten; the new data is in sync with the legacy sheet
+    assert w.queue[1][6] == "Done" and w.queue[1][7] == ""                                        # Done, and column H is cleared
+    assert "USER_ENTERED" in w.batch_inputs                                                       # the same way an append writes
+    assert any("1 of them replaced the old row in place" in m for m in logs) and any("Replaced in place: 1 rows of DB_DWR" in m for m in logs)
+
+
+def test_the_old_db_row_is_kept_when_another_queue_row_still_uses_the_old_pdf():
+    w = replace_world(statuses=("Waiting", "Done"))
+    w.queue[2][3] = URL(OLD)                                                                      # queue row 3 still points to the old PDF
+    s = run(ns(), w.clients(), log=lambda m: None)
+    assert s.replaced == 0 and len(w.db) == 3 and w.db[1][1] == "OLD-VERSION" and w.db[2][1] == "ACME-DWR-X"      # appended, the old row is untouched
+    assert w.queue[1][6] == "Done" and w.queue[1][7] == ""
+
+
+def test_a_changed_pdf_whose_old_file_is_not_in_the_db_is_appended():
+    w = replace_world(old_in_db=False)
+    s = run(ns(), w.clients(), log=lambda m: None)
+    assert s.replaced == 0 and len(w.db) == 2 and w.db[1][17] == URL(1) and w.queue[1][7] == ""
+
+
+def test_two_rows_with_the_same_old_pdf_replace_the_row_once_and_append_the_other():
+    w = replace_world(statuses=("Waiting", "Waiting"), replaces=(OLD, OLD))
+    s = run(ns(), w.clients(), log=lambda m: None)
+    assert s.done == 2 and s.replaced == 1 and len(w.db) == 3
+    assert sorted(r[17] for r in w.db[1:]) == sorted([URL(1), URL(2)]) and [r[7] for r in w.queue[1:]] == ["", ""]
+
+
+def test_a_failed_migration_keeps_the_old_db_row_and_the_old_file_id():
+    w = replace_world()
+    del w.drive_files[FID(1)]
+    s = run(ns(), w.clients(), log=lambda m: None)
+    assert s.errors == {"Drive Access": 1} and s.replaced == 0
+    assert w.db[1][1] == "OLD-VERSION" and w.db[1][17] == URL(OLD) and w.queue[1][6].startswith("Error: Drive Access") and w.queue[1][7] == FID(OLD)
+
+
+def test_a_new_pdf_that_is_already_in_the_db_needs_no_replacement():
+    w = replace_world()
+    w.db.append(build_db_row(SPECS["dwr"], DWR_JSON, URL(1), FOLDER, "C"))                       # somebody already migrated the new file
+    s = run(ns(), w.clients(), log=lambda m: None)
+    assert s.reconciled == 1 and w.gemini_calls == 0 and w.queue[1][6] == "Done" and w.queue[1][7] == ""
+    assert w.db[1][1] == "OLD-VERSION"                                                            # the old row is left for --sync-db to remove
+
+
+def test_replacement_works_with_no_reconcile_too():
+    w = replace_world()
+    s = run(ns(no_reconcile=True), w.clients(), log=lambda m: None)
+    assert s.replaced == 1 and len(w.db) == 2 and w.db[1][17] == URL(1)
+
+
+def test_select_jobs_reads_the_old_file_id_from_column_h():
+    values = [["h"] * 8, qrow(1, "Waiting") + [FID(9)], qrow(2, "Waiting")]
+    jobs = select_jobs(values, retry_errors=True, include_blank=False, only_rows=None)
+    assert [j.replaces for j in jobs] == [FID(9), ""]

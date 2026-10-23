@@ -8,17 +8,20 @@ from __future__ import annotations
 import argparse
 import copy
 import threading
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .config import PRICES_USD_PER_M
-from .cp_column import ensure_cp_header
+from .cp_column import ensure_db_headers
+from .db_sync import replace_db_rows
 from .models import Clients, Job, RowResult, RunControl, Usage
 from .processing import process_job
+from .queue_writer import clear_replaces
 from .reports import build_db_row
 from .sheets import SheetsError, append_rows, read_values, write_statuses
-from .specs import DB_CP_HEADER, QueueSpec, SPECS
+from .specs import QueueSpec, SPECS
 from .stamps import MIGRATION_COL, time_stamp, write_migration_time
 from .utils import chunked, col_letter, error_text, extract_file_id, parse_row_spec
 
@@ -31,7 +34,7 @@ def select_jobs(
     # [TH] แถว 1 = หัวตาราง จึงเริ่มที่แถว 2
     # [EN] Row 1 is the header, so start at row 2
     for idx, row in enumerate(values[1:], start=2):
-        cells = list(row) + [""] * (7 - len(row))
+        cells = list(row) + [""] * (8 - len(row))
         status = str(cells[6]).strip()
         pdf_url, folder_url = str(cells[3]).strip(), str(cells[4]).strip()
         if only_rows is not None:
@@ -43,7 +46,8 @@ def select_jobs(
                 pending = True
             if not pending:
                 continue
-        jobs.append(Job(row=idx, pdf_url=pdf_url, folder_url=folder_url, prior_status=status, doc_no=str(cells[0]).strip(), cp=str(cells[5]).strip()))
+        jobs.append(Job(row=idx, pdf_url=pdf_url, folder_url=folder_url, prior_status=status, doc_no=str(cells[0]).strip(), cp=str(cells[5]).strip(),
+                        replaces=str(cells[7]).strip()))
     return jobs
 
 
@@ -66,6 +70,10 @@ class Summary:
     # [TH] เวลาที่ migration จบซึ่งเขียนลงชีตคิว (ถ้าเขียนไม่ได้เป็นข้อความว่าง)
     # [EN] The migration finish time written to the queue sheet (empty when it could not be written)
     migrated_at: str = ""
+    # 링크가 바뀐 PDF 의 새 데이터로 제자리에서 바꾼 DB 행 수
+    # [TH] จำนวนแถวใน DB ที่ถูกแทนที่ในที่เดิมด้วยข้อมูลใหม่ของ PDF ที่ลิงก์เปลี่ยน
+    # [EN] Number of DB rows that were replaced in place with the new data of a PDF whose link changed
+    replaced: int = 0
 
 
 def explain_no_jobs(values: list[list[str]], sid: str, spec: QueueSpec, *, retry_errors: bool, include_blank: bool,
@@ -117,7 +125,7 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
     ctl = RunControl()
     usage = Usage()
 
-    values = read_values(clients.sheets, sid, f"'{spec.queue_tab}'!A1:G")
+    values = read_values(clients.sheets, sid, f"'{spec.queue_tab}'!A1:H")
     only_rows = parse_row_spec(args.only_rows) if args.only_rows else None
     jobs = select_jobs(values, retry_errors=not args.no_retry_errors, include_blank=args.include_blank, only_rows=only_rows)
 
@@ -177,16 +185,17 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
             log(f"(this run checked only {spec.queue_tab}; for {SPECS[other_key].queue_tab}: python migrate_queue.py --check-access --queue {other_key} --limit 0)")
         return summary
 
-    # 중복 방지: 이미 DB 에 있는 PDF -> AI 호출 없이 Done 처리
-    # [TH] กันซ้ำ: PDF ที่อยู่ใน DB แล้ว -> ตั้ง Done โดยไม่เรียก AI
-    # [EN] Duplicate guard: a PDF already in the DB -> mark Done without calling the AI
-    existing_ids: set[str] = set()
-    if not args.no_reconcile:
+    # 중복 방지: 이미 DB 에 있는 PDF -> AI 호출 없이 Done 처리. 같은 읽기로 링크가 바뀐 PDF 의 옛 DB 행도 찾음
+    # [TH] กันซ้ำ: PDF ที่อยู่ใน DB แล้ว -> ตั้ง Done โดยไม่เรียก AI และใช้การอ่านเดียวกันนี้หาแถวเก่าใน DB ของ PDF ที่ลิงก์เปลี่ยนด้วย
+    # [EN] Duplicate guard: a PDF already in the DB -> mark Done without calling the AI. The same read also finds the old DB row of a PDF whose link changed
+    db_rows_by_fid: dict[str, list[int]] = {}
+    if not args.no_reconcile or any(j.replaces for j in jobs):
         col = col_letter(spec.db_pdf_col + 1)
-        for r in read_values(clients.sheets, sid, f"'{spec.db_tab}'!{col}2:{col}"):
+        for number, r in enumerate(read_values(clients.sheets, sid, f"'{spec.db_tab}'!{col}2:{col}"), start=2):
             fid = extract_file_id(r[0]) if r else None
             if fid:
-                existing_ids.add(fid)
+                db_rows_by_fid.setdefault(fid, []).append(number)
+    existing_ids: set[str] = set() if args.no_reconcile else set(db_rows_by_fid)
     to_run: list[Job] = []
     reconciled_updates: dict[int, str] = {}
     for j in jobs:
@@ -199,14 +208,38 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
         write_statuses(clients.sheets, sid, spec.queue_tab, reconciled_updates)
         summary.reconciled = len(reconciled_updates)
         log(f"{summary.reconciled} rows are already in {spec.db_tab} -> marked Done without calling the AI (rows: {sorted(reconciled_updates)[:20]})")
+        # 새 PDF 가 이미 DB 에 있으므로 옛 행을 교체할 필요가 없음: H열을 비움
+        # [TH] PDF ใหม่อยู่ใน DB แล้ว จึงไม่ต้องแทนที่แถวเก่า: ล้างคอลัมน์ H
+        # [EN] The new PDF is already in the DB, so there is no old row to replace: column H is cleared
+        stale = [j.row for j in jobs if j.row in reconciled_updates and j.replaces]
+        if stale:
+            clear_replaces(clients.sheets, sid, spec.queue_tab, stale)
 
-    # 새 행을 DB 에 쓰기 전에 DB 의 C/P 열 머리글을 확인 (비어 있으면 채우고, 다른 머리글이면 이 큐를 중단)
-    # [TH] ก่อนเขียนแถวใหม่ลง DB ให้เช็กหัวตารางคอลัมน์ C/P (ถ้าว่างจะเติมให้ ถ้าเป็นหัวอื่นจะหยุดคิวนี้)
-    # [EN] Before new rows are written to the DB, check the header of its C/P column (an empty one is filled, a different one stops this queue)
+    # 바뀐 PDF 의 옛 DB 행을 새 데이터로 제자리에서 바꿀 대상 (큐 행 -> DB 행 번호).
+    # 다른 큐 행이 아직 옛 PDF 를 쓰고 있으면 그 행의 DB 데이터를 지키려고 교체하지 않고 새 행으로 추가
+    # [TH] เป้าหมายที่จะแทนที่แถวเก่าใน DB ของ PDF ที่ลิงก์เปลี่ยนด้วยข้อมูลใหม่ในที่เดิม (แถวคิว -> เลขแถว DB)
+    #      ถ้ามีแถวคิวอื่นที่ยังใช้ PDF เก่าอยู่ จะไม่แทนที่ (เพื่อรักษาข้อมูล DB ของแถวนั้น) แต่ต่อท้ายเป็นแถวใหม่
+    # [EN] The targets for replacing the old DB row of a PDF whose link changed with the new data, in place (queue row -> DB row number).
+    #      When another queue row still uses the old PDF the DB row is not replaced (to keep the data of that row) and a new row is appended instead
+    queue_refs = Counter(f for f in (extract_file_id(row[3]) if len(row) > 3 else None for row in values[1:]) if f)
+    replace_target: dict[int, int] = {}
+    claimed_db_rows: set[int] = set()
+    for j in to_run:
+        old = extract_file_id(j.replaces) if j.replaces else None
+        if not old or old == extract_file_id(j.pdf_url) or queue_refs.get(old, 0) > 0:
+            continue
+        target = next((n for n in db_rows_by_fid.get(old, []) if n not in claimed_db_rows), None)
+        if target:
+            replace_target[j.row] = target
+            claimed_db_rows.add(target)
+
+    # 새 행을 DB 에 쓰기 전에 DB 의 C/P 열과 "Legacy sync" 열의 머리글을 확인 (비어 있으면 채우고, 다른 머리글이면 이 큐를 중단)
+    # [TH] ก่อนเขียนแถวใหม่ลง DB ให้เช็กหัวตารางคอลัมน์ C/P และ "Legacy sync" (ถ้าว่างจะเติมให้ ถ้าเป็นหัวอื่นจะหยุดคิวนี้)
+    # [EN] Before new rows are written to the DB, check the headers of its C/P column and its "Legacy sync" column (an empty one is filled, a different one stops this queue)
     if to_run:
-        header_state = ensure_cp_header(clients.sheets, sid, spec)
-        if header_state == "written":
-            log(f"  ✓ Wrote the header '{DB_CP_HEADER}' to {spec.db_tab}!{col_letter(spec.db_cp_col + 1)}1")
+        for header, cell, state in ensure_db_headers(clients.sheets, sid, spec):
+            if state == "written":
+                log(f"  ✓ Wrote the header '{header}' to {spec.db_tab}!{cell}")
 
     max_bytes = args.max_mb * 1_000_000
     interrupted = False
@@ -253,8 +286,13 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
         #      can leave rows marked Done with no data)
         if ok:
             db_rows = [build_db_row(spec, r.data or {}, r.job.pdf_url, r.job.folder_url, r.job.cp) for r in ok]
+            replace_items = [(replace_target[r.job.row], row) for r, row in zip(ok, db_rows) if r.job.row in replace_target]
+            append_items = [row for r, row in zip(ok, db_rows) if r.job.row not in replace_target]
             try:
-                append_rows(clients.sheets, sid, spec.db_tab, db_rows)
+                if replace_items:
+                    replace_db_rows(clients.sheets, sid, spec, replace_items)
+                if append_items:
+                    append_rows(clients.sheets, sid, spec.db_tab, append_items)
             except SheetsError as e:
                 for r in ok:
                     updates[r.job.row] = error_text("DB Write", f"{e} | rows={len(db_rows)}, cols={len(db_rows[0])}")
@@ -273,18 +311,33 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
                         summary.multi_report += 1
                         log(f"  ⚠ row {r.job.row}: {r.multi} - please review")
                 summary.done += len(ok)
+                summary.replaced += len(replace_items)
                 log(f"  ✓ {len(ok)} rows -> {spec.db_tab} (queue rows {[r.job.row for r in ok][:10]}{'…' if len(ok) > 10 else ''})")
+                if replace_items:
+                    log(f"  ✓ {len(replace_items)} of them replaced the old row in place (the PDF of the item changed in the legacy sheet)")
         try:
             write_statuses(clients.sheets, sid, spec.queue_tab, updates)
         except SheetsError as e:
             log(f"  !! writing the queue statuses failed: {e}\n     the data is already in {spec.db_tab} - re-run and those rows are marked Done without calling the AI")
             ctl.request_stop("writing the queue statuses failed")
+        else:
+            # Done 이 된 행의 H열(교체 대기)을 비움. 실패한 행은 H열을 남겨 옛 DB 행이 보호되고 다음에 다시 교체를 시도함
+            # [TH] ล้างคอลัมน์ H (รอแทนที่) ของแถวที่เป็น Done แล้ว แถวที่พลาดจะเก็บค่า H ไว้ แถวเก่าใน DB จึงยังถูกปกป้องและลองแทนที่ใหม่รอบหน้า
+            # [EN] Clears column H (waiting to replace) of the rows that are Done now. A row that failed keeps its H, so the old DB row stays protected and the replacement is tried again
+            finished = [j.row for j in to_run if updates.get(j.row) == "Done" and j.replaces]
+            if finished:
+                try:
+                    clear_replaces(clients.sheets, sid, spec.queue_tab, finished)
+                except SheetsError as e:
+                    log(f"  ⚠ could not clear column H of the queue rows {finished[:10]}: {e}")
         if interrupted:
             break
 
     summary.stopped_reason = ctl.stop_reason
     log("-" * 60)
     log(f"Finished: Done={summary.done} (+reconciled {summary.reconciled}), Error={sum(summary.errors.values())} {summary.errors or ''}, Skipped={summary.skipped}")
+    if summary.replaced:
+        log(f"Replaced in place: {summary.replaced} rows of {spec.db_tab}")
     if summary.cover_only:
         log(f"Of the Done rows, {summary.cover_only} used the cover image instead of a large PDF (like the Apps Script) - data from the first page only")
     if summary.multi_report:

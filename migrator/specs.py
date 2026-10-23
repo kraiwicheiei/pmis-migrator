@@ -34,6 +34,16 @@ SINGLE_REPORT_HINT = (
 # [TH] หัวตารางของคอลัมน์ C/P ในแท็บ DB (DB_DWR คอลัมน์ T, DB_DRQ คอลัมน์ S)
 # [EN] The header of the C/P column of the DB tabs (column T in DB_DWR, column S in DB_DRQ)
 DB_CP_HEADER = "Status (C/P)"
+# 옛 시트와 맞는 DB 행에 붙이는 표시 열의 머리글과 값 (C/P 열 바로 뒤: DB_DWR 은 U열, DB_DRQ 는 T열).
+# 행의 PDF 가 큐(= 옛 시트와 같은 내용)에 있으면 "Synced", 큐에 없는 행(고아), 바뀐 PDF 의 교체를 기다리는 행, 이 도구가 쓴 행이 아니라 지우지 않은 행은 비어 있음
+# [TH] หัวตารางและค่าของคอลัมน์ป้ายที่ติดให้แถวใน DB ที่ตรงกับชีตเก่า (ต่อจากคอลัมน์ C/P ทันที: DB_DWR คอลัมน์ U, DB_DRQ คอลัมน์ T)
+#      ถ้า PDF ของแถวอยู่ในคิว (= เนื้อหาเดียวกับชีตเก่า) จะเป็น "Synced" ส่วนแถวที่ไม่อยู่ในคิว (แถวกำพร้า), แถวที่รอแทนที่ด้วย PDF ใหม่,
+#      และแถวที่ไม่ใช่แถวที่เครื่องมือนี้เขียนจึงไม่ลบ จะว่าง
+# [EN] The header and value of the tag column put on the DB rows that match the legacy sheet (right after the C/P column: column U in DB_DWR, column T in DB_DRQ).
+#      "Synced" when the PDF of the row is in the queue (= the same content as the legacy sheet); empty for a row that is not in the queue (an orphan),
+#      a row that waits to be replaced by a new PDF, and a row this tool did not write (so it is not removed)
+DB_SYNC_HEADER = "Legacy sync"
+DB_SYNC_VALUE = "Synced"
 
 
 @dataclass(frozen=True)
@@ -42,9 +52,10 @@ class QueueSpec:
     queue_tab: str
     db_tab: str
     prompt: str
-    # DB 의 각 열: ("const", 값) | ("field", 키 이름) | ("json", 키 이름) | ("pdf",) | ("folder",) | ("cp",)
-    # [TH] แต่ละคอลัมน์ของ DB: ("const", ค่า) | ("field", ชื่อคีย์) | ("json", ชื่อคีย์) | ("pdf",) | ("folder",) | ("cp",)
-    # [EN] Each DB column: ("const", value) | ("field", key name) | ("json", key name) | ("pdf",) | ("folder",) | ("cp",)
+    # DB 의 각 열: ("const", 값) | ("field", 키 이름) | ("json", 키 이름) | ("pdf",) | ("folder",) | ("cp",) | ("sync",)
+    # [TH] แต่ละคอลัมน์ของ DB: ("const", ค่า) | ("field", ชื่อคีย์) | ("json", ชื่อคีย์) | ("pdf",) | ("folder",) | ("cp",) | ("sync",)
+    # [EN] Each DB column: ("const", value) | ("field", key name) | ("json", key name) | ("pdf",) | ("folder",) | ("cp",) | ("sync",)
+    # ("sync",) = "Synced": migrate 가 쓰는 행은 방금 큐의 PDF 로 만든 것이므로 옛 시트와 맞음 / [TH] แถวที่ migrate เขียนสร้างจาก PDF ของคิวเมื่อครู่ จึงตรงกับชีตเก่า / [EN] a row migrate writes was just made from the PDF of the queue, so it matches the legacy sheet
     # ("cp",) = 큐 시트 F열(Status(C/P))의 값 / [TH] ค่าจากคอลัมน์ F (Status(C/P)) ของชีตคิว / [EN] the value of column F (Status(C/P)) of the queue sheet
     columns: tuple
     # DB 에서 PDF Link 열의 인덱스(0부터). 중복 확인에 사용
@@ -55,6 +66,10 @@ class QueueSpec:
     # [TH] index (เริ่ม 0) ของคอลัมน์ C/P ใน DB ต่อจากคอลัมน์เดิมทันที: DB_DWR คือคอลัมน์ T (index 19), DB_DRQ คือคอลัมน์ S (index 18)
     # [EN] 0-based index of the C/P column in the DB, right after the existing columns: column T (index 19) in DB_DWR, column S (index 18) in DB_DRQ
     db_cp_col: int
+    # DB 에서 "Legacy sync" 표시 열의 인덱스(0부터). C/P 열 바로 뒤: DB_DWR 은 U열(index 20), DB_DRQ 는 T열(index 19)
+    # [TH] index (เริ่ม 0) ของคอลัมน์ป้าย "Legacy sync" ใน DB ต่อจากคอลัมน์ C/P ทันที: DB_DWR คือคอลัมน์ U (index 20), DB_DRQ คือคอลัมน์ T (index 19)
+    # [EN] 0-based index of the "Legacy sync" tag column in the DB, right after the C/P column: column U (index 20) in DB_DWR, column T (index 19) in DB_DRQ
+    db_sync_col: int
     # AI JSON 에서 문서 번호가 들어 있는 키 (여러 보고서가 돌아왔을 때 큐의 Doc No 와 맞춰 고르는 데 사용)
     # [TH] คีย์ใน JSON ของ AI ที่เก็บเลขเอกสาร (ใช้จับคู่กับ Doc No ของคิวเมื่อ AI ตอบกลับมาหลายรายงาน)
     # [EN] Key in the AI JSON that holds the document number (used to match the queue's Doc No when the AI returns several reports)
@@ -78,10 +93,11 @@ SPECS = {
             ("field", "Total_Manpower"), ("field", "Total_Equipment"),
             ("json", "Manpower_Details"), ("json", "Equipment_Details"),
             ("field", "Activities"), ("field", "Issues_Delays"), ("field", "AI_Risk_Flag"),
-            ("field", "Linked_RITs"), ("const", "AI Migrated"), ("pdf",), ("folder",), ("cp",),
+            ("field", "Linked_RITs"), ("const", "AI Migrated"), ("pdf",), ("folder",), ("cp",), ("sync",),
         ),
         db_pdf_col=17,
         db_cp_col=19,
+        db_sync_col=20,
         no_key="DWR_No",
         # E열(index 4) ~ BD열(index 55)
         # [TH] คอลัมน์ E (index 4) ถึง BD (index 55)
@@ -99,10 +115,11 @@ SPECS = {
             ("field", "Location"), ("field", "WBS"), ("field", "Time"), ("field", "Shift"),
             ("field", "Activities"), ("field", "Unit_Quantity"), ("field", "Linked_RITs"),
             ("field", "Approved_by"), ("field", "Comments"), ("const", "AI Migrated"),
-            ("pdf",), ("folder",), ("const", ""), ("const", ""), ("cp",),
+            ("pdf",), ("folder",), ("const", ""), ("const", ""), ("cp",), ("sync",),
         ),
         db_pdf_col=14,
         db_cp_col=18,
+        db_sync_col=19,
         no_key="DRQ_No",
         # E열(index 4) ~ BF열(index 57)
         # [TH] คอลัมน์ E (index 4) ถึง BF (index 57)

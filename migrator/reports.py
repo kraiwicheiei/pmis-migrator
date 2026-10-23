@@ -9,7 +9,7 @@ import json
 import re
 from typing import Any
 
-from .specs import QueueSpec
+from .specs import DB_SYNC_VALUE, QueueSpec
 
 
 def cell_value(v: Any) -> Any:
@@ -46,6 +46,8 @@ def build_db_row(spec: QueueSpec, data: dict, pdf_url: str, folder_url: str, cp:
             row.append(folder_url)
         elif kind == "cp":
             row.append(cp)
+        elif kind == "sync":
+            row.append(DB_SYNC_VALUE)
     return row
 
 

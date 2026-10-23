@@ -1,22 +1,24 @@
 """
---extract 테스트: 새로 만들기, 합치기(merge), 다른 파일에서 읽기, 새로고침 시각
-[TH] เทสต์ --extract: สร้างใหม่, รวม (merge), อ่านจากไฟล์อื่น, เวลา refresh
-[EN] Tests for --extract: rebuild, merge, reading from another file, the refresh time
+--extract 테스트: 새로 만들기, 새로 계산해 기존 행과 맞추기(sync), 다른 파일에서 읽기, 새로고침 시각
+[TH] เทสต์ --extract: สร้างใหม่, คำนวณใหม่แล้วจับคู่กับแถวเดิม (sync), อ่านจากไฟล์อื่น, เวลา refresh
+[EN] Tests for --extract: rebuild, recompute and match with the existing rows (sync), reading from another file, the refresh time
 """
 
 import json
 
 import pytest
 
-from migrator import legacy_sheet, queue_writer
+from migrator import extract as extract_module, legacy_sheet, queue_writer
+from migrator.db_sync import DbSyncSummary
 from migrator.extract import extract_queue, run_extract
 from migrator.legacy_sheet import LegacyItem
-from migrator.queue_writer import MergePlan, QUEUE_HEADER, apply_merge, plan_merge
+from migrator.queue_writer import QUEUE_HEADER, clear_replaces, plan_sync, status_rank
 from migrator.sheets import SheetsError
 from migrator.stamps import QUEUE_REFRESH_LABEL, REFRESH_COL
 
-from tests.fakes import NON_ENGLISH, URL, qrow
-from tests.legacy_fakes import DRQ_ROWS, DWR_ROWS, FakeLegacy, LEGACY_FILE, LEGACY_HEADER, STAMP, extract_logs, legacy_grid, merge_queue, mk, txt, xargs
+from tests.fakes import FID, NON_ENGLISH, URL, qrow
+from tests.memory_sheets import MemorySheets
+from tests.legacy_fakes import DRQ_ROWS, DWR_ROWS, FakeLegacy, LEGACY_FILE, LEGACY_HEADER, STAMP, core, extract_logs, legacy_grid, merge_queue, mk, txt, xargs
 
 
 # --- 읽고 쓰기 / read and write / อ่านและเขียน ---
@@ -41,7 +43,8 @@ def test_extract_reuses_an_existing_queue_tab_without_creating_it():
     w = FakeLegacy(queues={"MIGRATION_QUEUE": [QUEUE_HEADER, list(old)]})
     summary, _ = extract_logs(w)
     assert not summary.created_tab and ("addSheet", "MIGRATION_QUEUE") not in w.events and ("clear", "MIGRATION_QUEUE") not in w.events
-    assert w.queues["MIGRATION_QUEUE"] == [QUEUE_HEADER, old] + DWR_ROWS            # merged: the existing row stays, the new items are appended
+    assert core(w.queues["MIGRATION_QUEUE"]) == [QUEUE_HEADER] + DWR_ROWS            # recomputed from the legacy sheet: the row that is not in it is gone
+    assert (summary.added, summary.removed) == (4, 1)
 
 
 def test_extract_dry_run_reads_but_writes_nothing():
@@ -52,42 +55,40 @@ def test_extract_dry_run_reads_but_writes_nothing():
     assert any("--dry-run" in m and "new tab" in m for m in logs) and any("sample: R-001-CIV-001" in m for m in logs)
 
 
-def test_extract_merges_into_a_queue_in_progress_and_keeps_the_statuses():
-    existing = merge_queue()
-    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in existing]})
+def test_extract_recomputes_a_queue_in_progress_and_keeps_the_status_of_the_existing_rows():
+    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in merge_queue()]})
     summary, logs = extract_logs(w)
     queue = w.queues["MIGRATION_QUEUE"]
-    assert queue[1] == existing[1]                                                      # Done: untouched even though the legacy link differs
-    assert queue[2] == [*DWR_ROWS[1][:6], "Error: Drive Access | x"]                    # B..F refreshed from the legacy sheet, status kept
-    assert queue[3] == existing[3] and queue[4] == existing[4]                          # identical row and a queue-only row are untouched
-    assert queue[5:] == [DWR_ROWS[3]] and len(queue) == 6                               # only the new item is appended (as Waiting)
-    assert w.updated_rows == [("MIGRATION_QUEUE", 3)] and "clear" not in [e[0] for e in w.events]
-    assert [e[0] for e in w.events] == ["update", "append", "refreshed"]
-    assert (summary.added, summary.updated, summary.unchanged, summary.kept_done, summary.written) == (1, 1, 1, 1, 1)
-    assert summary.refused == ""
-    assert any("1 Done rows have a different PDF link in the legacy sheet (kept as is)" in m for m in logs)
-    assert any("Merged into MIGRATION_QUEUE: +1 new, 1 updated, 1 unchanged, 1 Done kept as is, 1 not in the legacy sheet any more" in m for m in logs)
+    relinked, error, waiting, new = (list(r) + [""] for r in DWR_ROWS)
+    relinked[7] = FID(7)                                                                 # the Done row whose PDF changed (URL(7) -> URL(2)): Waiting again, the old file ID in H
+    error[6] = "Error: Drive Access | x"
+    assert queue[1:] == [relinked, error, waiting, new]                                  # A..F recomputed, G kept (except the relinked row); OLD-1 is gone
+    assert [e[0] for e in w.events] == ["header", "put", "refreshed"] and "clear" not in [e[0] for e in w.events]
+    assert (summary.added, summary.updated, summary.unchanged, summary.kept_done, summary.removed, summary.relinked, summary.written) == (1, 2, 1, 0, 1, 1, 4)
+    assert any("1 Done rows got a new PDF link from the legacy sheet: set back to Waiting" in m for m in logs)
+    assert any("1 removed rows were Done / Error" in m for m in logs)
+    assert any("Synced MIGRATION_QUEUE: 3 kept (2 changed, 0 renumbered, 1 set back to Waiting), +1 new, 0 duplicate rows merged, 1 rows not in the legacy sheet any more removed; "
+               "statuses kept: Done 0, Error 1, Waiting 2 | 4 rows" in m for m in logs)
 
 
-def test_a_second_merge_changes_nothing_but_the_refresh_time():
+def test_a_second_sync_changes_nothing_but_the_refresh_time():
     w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in merge_queue()]})
     extract_logs(w)
     after_first = [list(r) for r in w.queues["MIGRATION_QUEUE"]]
     w.events.clear()
     summary, logs = extract_logs(w)
     assert w.queues["MIGRATION_QUEUE"] == after_first
-    assert [e[0] for e in w.events] == ["refreshed"] and (summary.added, summary.updated) == (0, 0)
-    assert any("Merged into MIGRATION_QUEUE: +0 new, 0 updated, 3 unchanged, 1 Done kept as is" in m for m in logs)
+    assert [e[0] for e in w.events] == ["refreshed"] and (summary.added, summary.updated, summary.written) == (0, 0, 0)
+    assert any("Synced MIGRATION_QUEUE: no change (4 kept (0 changed, 0 renumbered, 0 set back to Waiting)" in m for m in logs)
 
 
-def test_extract_merge_dry_run_reports_the_plan_and_writes_nothing():
+def test_extract_sync_dry_run_reports_the_plan_and_writes_nothing():
     existing = merge_queue()
     w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in existing]})
     summary, logs = extract_logs(w, dry_run=True)
     assert w.events == [] and w.queues["MIGRATION_QUEUE"] == existing and w.refresh == {}
-    assert (summary.added, summary.updated, summary.written) == (1, 1, 0)
-    assert any("(--dry-run) nothing was written: would merge into MIGRATION_QUEUE: +1 new, 1 updated" in m for m in logs)
-    assert any("sample (new): R-003-CIV-003" in m for m in logs)
+    assert (summary.added, summary.updated, summary.removed, summary.written) == (1, 2, 1, 0)
+    assert any("(--dry-run) nothing was written: would sync MIGRATION_QUEUE: 3 kept (2 changed" in m and "+1 new" in m for m in logs)
 
 
 def test_extract_overwrite_rebuilds_the_queue_and_wipes_the_statuses():
@@ -97,7 +98,7 @@ def test_extract_overwrite_rebuilds_the_queue_and_wipes_the_statuses():
     assert any("--overwrite: the existing statuses (Done 2, Error 1) will be wiped" in m for m in logs)
 
 
-def test_extract_refuses_to_merge_into_a_tab_with_an_unexpected_header():
+def test_extract_refuses_to_sync_a_tab_with_an_unexpected_header():
     existing = [["Doc", "Date"], qrow(1, "Done")]
     w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in existing]})
     summary, logs = extract_logs(w)
@@ -113,17 +114,13 @@ def test_an_empty_existing_tab_is_filled_like_a_new_queue():
     assert w.queues["MIGRATION_QUEUE"] == [QUEUE_HEADER] + DWR_ROWS and summary.written == 4 and not summary.created_tab
 
 
-def test_plan_merge_matches_on_doc_no_and_date_and_updates_in_chunks(monkeypatch):
+def test_plan_sync_matches_on_doc_no_and_date_and_a_changed_date_is_a_new_item():
     item = LegacyItem("R-9-CIV-1", "2025-01-01", "CIV", URL(1), "", False)
     other_day = LegacyItem("R-9-CIV-1", "2025-01-02", "CIV", URL(1), "", False)
-    existing = [QUEUE_HEADER, ["R-9-CIV-1", "2025-01-01", "CIV", "", "", "P", "Waiting"]]
-    plan = plan_merge(existing, [item, other_day])
-    assert plan.new_items == [other_day] and plan.updates == {2: ["2025-01-01", "CIV", URL(1), "", "P"]}   # same Doc No on another Date is a new item
-    monkeypatch.setattr(queue_writer, "EXTRACT_UPDATES_PER_WRITE", 2)
-    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(QUEUE_HEADER)] + [[f"D{i}", "d", "CIV", "", "", "P", "Waiting"] for i in range(5)]})
-    plan = MergePlan(updates={i: ["d", "CIV", URL(i), "", "P"] for i in range(2, 7)})
-    apply_merge(w.clients().sheets, "SID", "MIGRATION_QUEUE", plan)
-    assert [e[2] for e in w.events if e[0] == "update"] == [2, 2, 1]
+    existing = [QUEUE_HEADER, ["R-9-CIV-1", "2025-01-01", "CIV", "", "", "P", "Error: x"]]
+    plan = plan_sync(existing, [item, other_day])
+    assert plan.rows == [["R-9-CIV-1", "2025-01-01", "CIV", URL(1), "", "P", "Error: x", ""], other_day.to_row() + [""]]     # A..F recomputed, the status of the old row kept
+    assert (plan.matched, plan.new, plan.updated, plan.removed, plan.changed) == (1, 1, 1, 0, True)
 
 
 def test_extract_with_no_items_leaves_the_queue_alone():
@@ -182,12 +179,13 @@ def test_extract_reads_the_legacy_tab_from_another_spreadsheet_and_writes_to_the
     assert all(LEGACY_FILE not in path for method, path in w.sheets_calls if method != "GET")
 
 
-def test_extract_from_another_spreadsheet_still_checks_the_target_for_existing_progress():
-    existing = [QUEUE_HEADER, qrow(1, "Done")]
-    w = FakeLegacy(legacy_sid=LEGACY_FILE, queues={"MIGRATION_QUEUE": [list(r) for r in existing]})
+def test_extract_from_another_spreadsheet_still_syncs_with_the_target_queue():
+    done_rows = [list(r) for r in DWR_ROWS[:2]]
+    done_rows[0][6], done_rows[1][6] = "Done", "Done"
+    w = FakeLegacy(legacy_sid=LEGACY_FILE, queues={"MIGRATION_QUEUE": [list(QUEUE_HEADER)] + [list(r) for r in done_rows]})
     summary, _ = extract_logs(w, legacy_spreadsheet_id=LEGACY_FILE)
-    assert w.queues["MIGRATION_QUEUE"] == existing + DWR_ROWS and "clear" not in [e[0] for e in w.events]       # the target's Done row is kept
-    assert (summary.added, summary.kept_done) == (4, 0)
+    assert [r[6] for r in w.queues["MIGRATION_QUEUE"][1:]] == ["Done", "Done", "Waiting", "Waiting"] and "clear" not in [e[0] for e in w.events]     # the target's Done rows keep their status
+    assert (summary.added, summary.kept_done) == (2, 2)
 
 
 def test_extract_without_a_legacy_spreadsheet_id_keeps_reading_the_target_file():
@@ -266,24 +264,23 @@ def renumbered_world():
 def test_a_changed_no_in_the_legacy_sheet_renames_the_doc_no_of_the_same_items():
     w = renumbered_world()
     queue = w.queues["MIGRATION_QUEUE"]
-    statuses = [r[6] for r in queue[1:]]
     summary, logs = extract_logs(w)
     assert [r[0] for r in queue[1:]] == ["R-777-CIV-001", "R-777-ELE-5", "R-777-REM (DMS)-9", "R-003-CIV-003"]
-    assert len(queue) == 5 and [r[6] for r in queue[1:]] == statuses                       # no duplicate rows, every status is kept
-    assert queue[1][3] == URL(99)                                                          # Done: only the Doc No changed, the link is kept
-    assert summary.renumbered == 3 and summary.added == 0 and w.renamed_rows == [("MIGRATION_QUEUE", 2), ("MIGRATION_QUEUE", 3), ("MIGRATION_QUEUE", 4)]
-    assert any("3 renumbered (Doc No changed because column A of the legacy sheet changed)" in m for m in logs)
+    assert len(queue) == 5 and [r[6] for r in queue[1:]] == ["Waiting", "Error: Drive Access | x", "Waiting", "Waiting"]       # no duplicate row; only the relinked Done row went back to Waiting
+    assert queue[1][3] == URL(2) and queue[1][7] == FID(99)                                # its PDF is recomputed; the old file ID waits in H
+    assert summary.renumbered == 3 and summary.added == 0 and summary.removed == 0 and summary.relinked == 1
+    assert any("3 renumbered" in m for m in logs) and any("1 Done rows got a new PDF link" in m for m in logs)
     again, _ = extract_logs(w)                                                             # nothing left to rename
-    assert again.renumbered == 0 and again.added == 0 and [r[0] for r in queue[1:]][0] == "R-777-CIV-001"
+    assert again.renumbered == 0 and again.added == 0 and again.relinked == 0 and [r[0] for r in queue[1:]][0] == "R-777-CIV-001"
 
 
-def test_a_renamed_row_that_is_not_done_also_gets_the_new_legacy_data():
+def test_a_renamed_row_keeps_its_status_and_gets_the_recomputed_columns():
     w = renumbered_world()
     queue = w.queues["MIGRATION_QUEUE"]
     queue[3][6] = "Waiting"
     queue[3][3] = URL(55)                                                                  # a stale link on a Waiting row
     extract_logs(w)
-    assert queue[3][0] == "R-777-REM (DMS)-9" and queue[3][3] == "" and queue[3][6] == "Waiting"      # Doc No and B..F follow the legacy sheet, G stays
+    assert queue[3][0] == "R-777-REM (DMS)-9" and queue[3][3] == "" and queue[3][6] == "Waiting"      # A..F follow the legacy sheet, G stays
 
 
 def test_renumber_dry_run_reports_the_plan_and_writes_nothing():
@@ -292,7 +289,7 @@ def test_renumber_dry_run_reports_the_plan_and_writes_nothing():
     summary, logs = extract_logs(w, dry_run=True)
     assert w.queues["MIGRATION_QUEUE"] == before and w.events == [] and summary.renumbered == 3
     assert any("sample (renumbered): row 2: R-001-CIV-001 -> R-777-CIV-001" in m for m in logs)
-    assert any("would merge into MIGRATION_QUEUE" in m and "3 renumbered" in m for m in logs)
+    assert any("would sync MIGRATION_QUEUE" in m and "3 renumbered" in m for m in logs)
 
 
 def test_a_changed_date_is_still_a_new_item_and_an_unknown_cell_text_never_renames():
@@ -301,26 +298,242 @@ def test_a_changed_date_is_still_a_new_item_and_an_unknown_cell_text_never_renam
     other_date = LegacyItem("R-2-CIV-001", "2025-01-02", "CIV", "", "", False, "001")
     other_text = LegacyItem("R-2-CIV-002", "2025-01-01", "CIV", "", "", False, "002")
     no_text = LegacyItem("R-2-CIV-001", "2025-01-01", "CIV", "", "", False)                 # built by hand without the cell text
-    plan = plan_merge(existing, [same_item_new_no])
-    assert plan.renamed == {2: "R-2-CIV-001"} and plan.old_names == {2: "R-1-CIV-001"} and plan.new_items == [] and plan.missing == 0
+    plan = plan_sync(existing, [same_item_new_no])
+    assert plan.renumbered == 1 and plan.renumbered_samples == [(2, "R-1-CIV-001", "R-2-CIV-001")] and plan.new == 0 and plan.removed == 0
     for item in (other_date, other_text, no_text):
-        plan = plan_merge(existing, [item])
-        assert plan.renamed == {} and plan.new_items == [item] and plan.missing == 1
+        plan = plan_sync(existing, [item])
+        assert plan.renumbered == 0 and plan.new == 1 and plan.removed == 1 and plan.rows == [item.to_row() + [""]]
 
 
 def test_one_queue_row_is_never_claimed_by_two_items():
-    existing = [QUEUE_HEADER, ["R-1-CIV-001", "2025-01-01", "CIV", "", "", "P", "Waiting"]]
+    existing = [QUEUE_HEADER, ["R-1-CIV-001", "2025-01-01", "CIV", "", "", "P", "Done"]]
     a = LegacyItem("R-2-CIV-001", "2025-01-01", "CIV", "", "", False, "001")
     b = LegacyItem("R-3-CIV-001", "2025-01-01", "CIV", "", "", False, "001")
-    plan = plan_merge(existing, [a, b])
-    assert plan.renamed == {2: "R-2-CIV-001"} and plan.new_items == [b]
+    plan = plan_sync(existing, [a, b])
+    assert [r[6] for r in plan.rows] == ["Done", "Waiting"] and (plan.matched, plan.new) == (1, 1)
 
 
-def test_apply_merge_writes_a_renamed_doc_no_and_the_other_columns_separately(monkeypatch):
-    monkeypatch.setattr(queue_writer, "EXTRACT_UPDATES_PER_WRITE", 2)
-    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(QUEUE_HEADER)] + [[f"D{i}", "d", "CIV", "", "", "P", "Waiting"] for i in range(3)]})
-    plan = MergePlan(renamed={2: "N2", 3: "N3"}, updates={3: ["d2", "CIV", "u", "", "C"]})
-    apply_merge(w.clients().sheets, "SID", "MIGRATION_QUEUE", plan)
-    rows = w.queues["MIGRATION_QUEUE"]
-    assert [r[0] for r in rows[1:]] == ["N2", "N3", "D2"] and rows[2][1:6] == ["d2", "CIV", "u", "", "C"] and rows[2][6] == "Waiting"
-    assert [e[2] for e in w.events if e[0] == "update"] == [2, 1]                          # three writes, two per request
+# --- 같은 항목이 두 행으로 들어 있던 경우 / the same item twice / รายการเดียวมีสองแถว ---
+def duplicated_world():
+    """
+    옛 Doc No(처리됨)와 새 Doc No(Waiting)로 두 번 들어간 큐 (옛 시트의 No. 가 바뀐 뒤 이전 방식의 extract 가 만든 상태)
+    [TH] คิวที่รายการเดียวเข้าสองครั้ง ด้วย Doc No เก่า (ประมวลผลแล้ว) และ Doc No ใหม่ (Waiting) (สภาพหลัง extract แบบเก่าที่ No. ของชีตเก่าเปลี่ยน)
+    [EN] A queue where every item went in twice, under the old Doc No (processed) and the new one (Waiting): what an older extract left after the legacy No. changed
+    """
+    grid = legacy_grid()
+    w = FakeLegacy(grids={"LEGACY-DWR": grid, "LEGACY-DRQ": legacy_grid()})
+    extract_logs(w)
+    queue = w.queues["MIGRATION_QUEUE"]
+    queue[1][6], queue[2][6] = "Done", "Error: Drive Access | x"                   # the original rows were processed
+    grid[4][0] = txt("R-777")                                                      # the legacy No. of the first data row changes
+    for row in [list(r) for r in queue[1:4]]:                                      # the copies an older extract appended under the new Doc No
+        copy = list(row)
+        copy[0] = copy[0].replace("R-001", "R-777")
+        copy[6] = "Waiting"
+        queue.append(copy)
+    w.events.clear()
+    return w
+
+
+def test_the_two_rows_of_one_item_become_one_and_keep_the_processed_status():
+    w = duplicated_world()
+    queue = w.queues["MIGRATION_QUEUE"]
+    assert len(queue) == 8
+    summary, logs = extract_logs(w)
+    assert [r[0] for r in queue[1:]] == ["R-777-CIV-001", "R-777-ELE-5", "R-777-REM (DMS)-9", "R-003-CIV-003"]
+    assert [r[6] for r in queue[1:]] == ["Done", "Error: Drive Access | x", "Waiting", "Waiting"]      # the processed copy wins, never the Waiting copy
+    assert len(queue) == 5 and summary.duplicates == 3 and summary.removed == 0 and summary.renumbered == 3       # the old (earlier / processed) row of every item is the one that stays, and it gets the new Doc No
+    assert [e[0] for e in w.events] == ["header", "put", "clear_tail", "refreshed"]                          # shorter than before: only the tail is cleared
+    assert any("3 duplicate rows merged" in m for m in logs)
+
+
+def test_status_rank_prefers_the_processed_row_and_the_earlier_row_on_a_tie():
+    assert [status_rank(s) for s in ("Done", "Error: x", "Something", "Waiting", "")] == [3, 2, 1, 0, 0]
+    existing = [QUEUE_HEADER, ["A-CIV-1", "d", "CIV", "", "", "P", "Waiting"], ["B-CIV-1", "d", "CIV", "", "", "P", "Error: a"], ["C-CIV-1", "d", "CIV", "", "", "P", "Error: b"]]
+    item = LegacyItem("D-CIV-1", "d", "CIV", "", "", False, "1")
+    plan = plan_sync(existing, [item])
+    assert plan.rows == [["D-CIV-1", "d", "CIV", "", "", "P", "Error: a", ""]] and plan.duplicates == 2
+
+
+def test_sync_writes_in_place_in_chunks_and_never_clears_the_whole_sheet(monkeypatch):
+    monkeypatch.setattr(queue_writer, "EXTRACT_ROWS_PER_WRITE", 3)
+    drq = FakeLegacy(queues={"MIGRATION_QUEUE_DRQ": [list(QUEUE_HEADER), ["x", "d", "CIV", "", "", "P", "Done"]]})
+    summary, _ = extract_logs(drq, "drq")
+    assert [e[:2] + e[3:] for e in drq.events if e[0] == "put"] == [("put", "MIGRATION_QUEUE_DRQ", 3), ("put", "MIGRATION_QUEUE_DRQ", 2)]      # 5 rows -> 3 + 2
+    assert "clear" not in [e[0] for e in drq.events] and core(drq.queues["MIGRATION_QUEUE_DRQ"][1:]) == DRQ_ROWS and summary.written == 5
+
+
+def test_sync_grows_the_sheet_first_when_it_has_too_few_rows():
+    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(QUEUE_HEADER), ["x", "d", "CIV", "", "", "P", "Done"]]})
+    w.queue_row_count = 3                                                           # header + 2 rows fit, the 4 new rows do not
+    extract_logs(w)
+    assert w.events[0] == ("grow", 2) and w.queue_row_count == 5 and core(w.queues["MIGRATION_QUEUE"][1:]) == DWR_ROWS
+
+
+def test_the_time_cells_are_not_touched_when_the_queue_is_synced():
+    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(QUEUE_HEADER), list(DWR_ROWS[0])]})
+    extract_logs(w)
+    assert all(not (e[0] == "clear") for e in w.events) and all("!I" not in str(e) and "!K" not in str(e) for e in w.events)
+
+
+# --- 링크가 바뀐 Done 행 / a Done row whose PDF changed / แถว Done ที่ PDF เปลี่ยน ---
+def stored(url, status, replaces="", cp="P"):
+    """큐에 이미 있는 행 (A~H) / [TH] แถวที่มีอยู่แล้วในคิว (A~H) / [EN] A row that is already in the queue (A-H)"""
+    return ["R-1-CIV-1", "d", "CIV", url, "", cp, status, replaces]
+
+
+def legacy_item(url):
+    return LegacyItem("R-1-CIV-1", "d", "CIV", url, "", False, "1")
+
+
+def one_row(existing_row, url):
+    plan = plan_sync([QUEUE_HEADER, existing_row], [legacy_item(url)])
+    return plan.rows[0], plan
+
+
+def test_a_done_row_with_a_new_pdf_goes_back_to_waiting_and_remembers_the_old_file():
+    row, plan = one_row(stored(URL(1), "Done"), URL(2))
+    assert row == ["R-1-CIV-1", "d", "CIV", URL(2), "", "P", "Waiting", FID(1)] and plan.relinked == 1
+    assert plan.kept == {"done": 0, "error": 0, "other": 0, "waiting": 1}
+
+
+def test_the_same_file_in_another_url_format_is_not_a_new_pdf():
+    other_format = f"https://drive.google.com/file/d/{FID(1)}/view?usp=sharing"
+    row, plan = one_row(stored(URL(1), "Done"), other_format)
+    assert row[3] == other_format and row[6:] == ["Done", ""] and plan.relinked == 0
+
+
+def test_a_done_row_whose_link_disappears_from_the_legacy_sheet_stays_done():
+    row, plan = one_row(stored(URL(1), "Done"), "")
+    assert row[3] == "" and row[6:] == ["Done", ""] and plan.relinked == 0
+
+
+def test_error_and_waiting_rows_keep_their_status_and_get_no_old_file_id():
+    for status in ("Error: Drive Access | x", "Waiting", ""):
+        row, plan = one_row(stored(URL(1), status), URL(2))
+        assert row[3] == URL(2) and row[6:] == [status, ""] and plan.relinked == 0
+
+
+def test_a_row_that_waits_for_a_replacement_keeps_its_old_file_id_when_the_link_changes_again():
+    row, plan = one_row(stored(URL(2), "Waiting", replaces=FID(1)), URL(3))
+    assert row[3] == URL(3) and row[6:] == ["Waiting", FID(1)] and plan.relinked == 0
+    row, _ = one_row(stored(URL(2), "Error: Drive Access | x", replaces=FID(1)), URL(3))
+    assert row[6:] == ["Error: Drive Access | x", FID(1)]                                  # a failed migration keeps protecting the old DB row
+
+
+def test_the_link_going_back_to_the_migrated_file_cancels_the_replacement():
+    row, plan = one_row(stored(URL(2), "Waiting", replaces=FID(1)), URL(1))
+    assert row[3] == URL(1) and row[6:] == ["Done", ""] and plan.relinked == 0
+
+
+def test_a_done_row_never_keeps_an_old_file_id():
+    row, _ = one_row(stored(URL(1), "Done", replaces=FID(9)), URL(1))
+    assert row[6:] == ["Done", ""]
+
+
+def test_clear_replaces_empties_column_h_of_the_given_rows_only():
+    w = MemorySheets({"MIGRATION_QUEUE": [list(QUEUE_HEADER) + ["Replaces"], ["a"] * 7 + ["f1"], ["b"] * 7 + ["f2"], ["c"] * 7 + ["f3"]]})
+    clear_replaces(w.clients().sheets, "SID", "MIGRATION_QUEUE", [4, 2, 4])
+    assert [r[7] for r in w.tabs["MIGRATION_QUEUE"][1:]] == ["", "f2", ""] and [r[6] for r in w.tabs["MIGRATION_QUEUE"][1:]] == ["a", "b", "c"]
+    assert w.inputs == ["RAW"]
+
+
+# --- 큐 안전장치 / the queue safety net / ตัวกันพลาดของคิว ---
+def queue_with_junk(count):
+    junk = [[f"junk-{i}", "2020-01-01", "X", "", "", "P", "Done"] for i in range(count)]
+    return {"MIGRATION_QUEUE": [list(QUEUE_HEADER)] + [list(r) for r in DWR_ROWS] + junk}
+
+
+def test_extract_refuses_to_remove_more_rows_than_the_limit_unless_it_is_allowed():
+    w = FakeLegacy(queues=queue_with_junk(130))
+    before = [list(r) for r in w.queues["MIGRATION_QUEUE"]]
+    summary, logs = extract_logs(w)
+    assert summary.refused == "too many removals" and summary.queue_rows is None and w.events == [] and w.queues["MIGRATION_QUEUE"] == before
+    assert any("Not syncing MIGRATION_QUEUE: 130 rows would be removed, more than the limit of 100" in m and "--allow-large-removal" in m for m in logs)
+    summary, _ = extract_logs(w, allow_large_removal=True)
+    assert summary.refused == "" and summary.removed == 130 and len(w.queues["MIGRATION_QUEUE"]) == 5
+
+
+def test_removing_exactly_the_limit_is_allowed_and_a_dry_run_shows_the_refusal_without_failing():
+    w = FakeLegacy(queues=queue_with_junk(100))
+    assert extract_logs(w)[0].removed == 100
+    big = FakeLegacy(queues=queue_with_junk(130))
+    assert run_extract(xargs(queue="dwr"), big.clients(), ["dwr"], log=lambda m: None) == 2
+    assert run_extract(xargs(queue="dwr", dry_run=True), big.clients(), ["dwr"], log=lambda m: None) == 0
+
+
+# --- 이번 extract 후의 큐 행 / the queue rows after this extract / แถวคิวหลัง extract รอบนี้ ---
+def test_the_summary_carries_the_queue_rows_the_db_sync_works_on():
+    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in merge_queue()]})
+    summary, _ = extract_logs(w)
+    assert summary.queue_rows == w.queues["MIGRATION_QUEUE"][1:] and len(summary.queue_rows[0]) == 8
+    dry = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in merge_queue()]})
+    summary, _ = extract_logs(dry, dry_run=True)
+    assert summary.queue_rows is not None and [r[0] for r in summary.queue_rows] == [r[0] for r in DWR_ROWS] and dry.events == []        # the planned rows, nothing written
+    fresh = FakeLegacy()
+    summary, _ = extract_logs(fresh)
+    assert summary.queue_rows == DWR_ROWS
+    refused = FakeLegacy(queues={"MIGRATION_QUEUE": [["Doc", "Date"], qrow(1, "Done")]})
+    assert extract_logs(refused)[0].queue_rows is None
+    empty = FakeLegacy(grids={"LEGACY-DWR": {3: LEGACY_HEADER, 4: mk({0: txt("R-1"), 4: txt("x")})}, "LEGACY-DRQ": {}})
+    assert extract_logs(empty)[0].queue_rows is None
+
+
+class DbSyncRecorder:
+    """sync_db_for_queue 대신 호출을 기록 / [TH] บันทึกการเรียกแทน sync_db_for_queue / [EN] Records the calls instead of sync_db_for_queue"""
+
+    def __init__(self, result=None, error=None):
+        self.calls, self.result, self.error = [], result or DbSyncSummary(), error
+
+    def __call__(self, args, clients, key, queue_rows, log=print):
+        self.calls.append((key, [list(r) for r in queue_rows], args.dry_run))
+        if self.error:
+            raise self.error
+        return self.result
+
+
+def test_extract_with_sync_db_makes_the_db_match_the_rows_of_the_synced_queue(monkeypatch):
+    recorder = DbSyncRecorder()
+    monkeypatch.setattr(extract_module, "sync_db_for_queue", recorder)
+    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in merge_queue()]})
+    assert run_extract(xargs(queue="dwr", sync_db=True), w.clients(), ["dwr"], log=lambda m: None) == 0
+    assert [c[0] for c in recorder.calls] == ["dwr"] and recorder.calls[0][1] == w.queues["MIGRATION_QUEUE"][1:] and recorder.calls[0][2] is False
+    assert "update" not in [e[0] for e in w.events] and w.events[0][0] == "header"                         # the queue was written before the DB was looked at
+
+
+def test_extract_with_sync_db_and_dry_run_hands_over_the_planned_rows(monkeypatch):
+    recorder = DbSyncRecorder()
+    monkeypatch.setattr(extract_module, "sync_db_for_queue", recorder)
+    w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in merge_queue()]})
+    before = [list(r) for r in w.queues["MIGRATION_QUEUE"]]
+    assert run_extract(xargs(queue="dwr", sync_db=True, dry_run=True), w.clients(), ["dwr"], log=lambda m: None) == 0
+    assert w.queues["MIGRATION_QUEUE"] == before and recorder.calls[0][2] is True and [r[0] for r in recorder.calls[0][1]] == [r[0] for r in DWR_ROWS]
+
+
+def test_extract_without_sync_db_never_touches_the_db(monkeypatch):
+    recorder = DbSyncRecorder()
+    monkeypatch.setattr(extract_module, "sync_db_for_queue", recorder)
+    run_extract(xargs(queue="dwr"), FakeLegacy().clients(), ["dwr"], log=lambda m: None)
+    assert recorder.calls == []
+
+
+def test_extract_skips_the_db_sync_of_a_queue_that_was_refused_or_failed(monkeypatch):
+    recorder = DbSyncRecorder()
+    monkeypatch.setattr(extract_module, "sync_db_for_queue", recorder)
+    bad_header = FakeLegacy(queues={"MIGRATION_QUEUE": [["Doc", "Date"], qrow(1, "Done")]})
+    assert run_extract(xargs(queue="dwr", sync_db=True), bad_header.clients(), ["dwr"], log=lambda m: None) == 2
+    too_many = FakeLegacy(queues=queue_with_junk(130))
+    assert run_extract(xargs(queue="dwr", sync_db=True), too_many.clients(), ["dwr"], log=lambda m: None) == 2
+    missing = FakeLegacy(grids={"LEGACY-DRQ": legacy_grid()})
+    assert run_extract(xargs(queue="dwr", sync_db=True), missing.clients(), ["dwr"], log=lambda m: None) == 2
+    assert recorder.calls == []
+
+
+def test_extract_with_sync_db_reports_a_refused_or_failed_db_sync_in_the_exit_code(monkeypatch):
+    logs = []
+    monkeypatch.setattr(extract_module, "sync_db_for_queue", DbSyncRecorder(result=DbSyncSummary(refused="too many removals")))
+    assert run_extract(xargs(queue="dwr", sync_db=True), FakeLegacy().clients(), ["dwr"], log=logs.append) == 2
+    assert run_extract(xargs(queue="dwr", sync_db=True, dry_run=True), FakeLegacy().clients(), ["dwr"], log=logs.append) == 0
+    monkeypatch.setattr(extract_module, "sync_db_for_queue", DbSyncRecorder(error=SheetsError("HTTP 403: boom")))
+    assert run_extract(xargs(queue="dwr", sync_db=True), FakeLegacy().clients(), ["dwr"], log=logs.append) == 2
+    assert any("✗ Could not sync DB_DWR: HTTP 403: boom" in m for m in logs)

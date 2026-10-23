@@ -189,3 +189,48 @@ def test_legacy_spreadsheet_option_needs_extract(monkeypatch):
     with pytest.raises(SystemExit) as e:
         main_with(monkeypatch, ["--queue", "dwr", "--legacy-spreadsheet", "abc"], RunRecorder())
     assert "--legacy-spreadsheet only works together with --extract" in str(e.value.code)
+
+
+# --- --sync-db / --allow-large-removal ---
+def sync_main(monkeypatch, argv):
+    calls = {}
+    monkeypatch.setenv("PMIS_SPREADSHEET_ID", "SID")
+    monkeypatch.setattr(cli, "make_clients", lambda args, need_gemini: calls.setdefault("need", need_gemini) is None or Clients(sheets=None, drive_factory=None, gemini=None, api_key="", sa_email="sa@x"))
+    monkeypatch.setattr(cli, "spreadsheet_title", lambda sess, sid: ("T", ""))
+    monkeypatch.setattr(cli, "run_db_sync", lambda args, clients, keys, log, sheet_title: calls.update(db_sync=(args.sync_db, args.allow_large_removal, keys)) or 0)
+    monkeypatch.setattr(cli, "run_queues", lambda *a, **k: calls.update(queues=True) or 0)
+    return main(argv), calls
+
+
+def test_sync_db_runs_the_db_sync_without_a_gemini_key(monkeypatch):
+    code, calls = sync_main(monkeypatch, ["--sync-db", "--queue", "dwr", "--allow-large-removal"])
+    assert code == 0 and calls == {"need": False, "db_sync": (True, True, ["dwr"])}
+
+
+def test_sync_db_with_extract_goes_through_the_extract_run(monkeypatch):
+    seen = {}
+    monkeypatch.setenv("PMIS_SPREADSHEET_ID", "SID")
+    monkeypatch.setenv("PMIS_LEGACY_DWR_SHEET", "A")
+    monkeypatch.setenv("PMIS_LEGACY_DRQ_SHEET", "B")
+    monkeypatch.setattr(cli, "make_clients", lambda args, need_gemini: Clients(sheets=None, drive_factory=None, gemini=None, api_key="", sa_email="sa@x"))
+    monkeypatch.setattr(cli, "spreadsheet_title", lambda sess, sid: ("T", ""))
+    monkeypatch.setattr(cli, "run_extract", lambda args, clients, keys, log, sheet_title: seen.update(sync_db=args.sync_db, large=args.allow_large_removal) or 0)
+    assert main(["--extract", "--sync-db"]) == 0 and seen == {"sync_db": True, "large": False}
+
+
+def test_sync_db_rejects_conflicting_options(monkeypatch):
+    monkeypatch.setenv("PMIS_SPREADSHEET_ID", "SID")
+    for argv, text in ((["--sync-db", "--backfill-cp"], "either --sync-db or --backfill-cp"),
+                       (["--sync-db", "--only-rows", "5", "--queue", "dwr"], "cannot be combined with --only-rows or --check-access"),
+                       (["--sync-db", "--check-access"], "cannot be combined with --only-rows or --check-access"),
+                       (["--sync-db", "--overwrite"], "--overwrite only works together with --extract"),
+                       (["--allow-large-removal"], "--allow-large-removal only works together with --extract or --sync-db"),
+                       (["--extract", "--backfill-cp"], "--backfill-cp cannot be combined with --extract")):
+        with pytest.raises(SystemExit) as e:
+            main(argv)
+        assert text in str(e.value.code)
+
+
+def test_the_new_options_are_off_by_default():
+    args = build_parser().parse_args([])
+    assert args.sync_db is False and args.allow_large_removal is False

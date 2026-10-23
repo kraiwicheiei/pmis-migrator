@@ -15,7 +15,7 @@ DB_DWR / DB_DRQ 열 순서는 기존과 완전히 동일하지만 내 PC 에서 
 | PDF 다운로드 -> Gemini -> DB_DWR / DB_DRQ 기록 -> `Done` 표시 | **이 Python 스크립트** |
 
 > **큐 다시 만들기:** Apps Script 의 `extractLegacyDwrLinks()` / `extractLegacyDrqLinks()` 는 큐를 `clear()` 한 뒤 **모든** 항목(이미 DB_DWR / DB_DRQ 에 있는 PDF 포함)을 `Waiting` 으로 다시 만들고, 기존 `Done` / `Error…` 상태는 모두 지워집니다.
-> Python 스크립트가 이를 보완합니다: PDF 가 이미 DB 에 있는 `Waiting` 행(PDF Link 열의 Drive 파일 ID 로 비교)은 AI 호출 없이 `Done` 으로 표시됩니다. `--extract` 는 `--overwrite` 를 붙였을 때만 같은 동작을 하며, 붙이지 않으면 이미 행이 있는 큐에 **합칩니다(merge)**: 모든 상태는 그대로 두고 새 항목만 추가합니다("큐 만들기" 참고). `--overwrite` 를 쓰기 전에는 항상 G열(과 DB)을 먼저 백업해 두세요.
+> Python 스크립트가 이를 보완합니다: PDF 가 이미 DB 에 있는 `Waiting` 행(PDF Link 열의 Drive 파일 ID 로 비교)은 AI 호출 없이 `Done` 으로 표시됩니다. `--extract` 는 `--overwrite` 를 붙였을 때만 같은 동작을 하며, 붙이지 않으면 이미 행이 있는 큐를 **맞춥니다(sync)**: 모든 행을 옛 시트에서 새로 계산하되 기존 행의 상태는 유지합니다("큐 만들기" 참고). `--overwrite` 를 쓰기 전에는 항상 G열(과 DB)을 먼저 백업해 두세요.
 
 ## 설치 (최초 1회) - PowerShell
 
@@ -84,8 +84,8 @@ python migrate_queue.py --extract --queue drq   # 한 큐만 (그 큐의 탭 이
 
 - `--extract` 는 `GEMINI_API_KEY` 도 Drive 접근도 필요 없고, `--limit` 은 무시하며, `--only-rows` / `--check-access` 와 함께 쓸 수 없습니다.
 - 큐마다 고유 항목 수, PDF 링크가 없는 항목 수(이 행들은 이식할 때 `Error: No URL` 이 됨), 헤더가 비어 건너뛴 칸 수를 콘솔에 보여 줍니다.
-- **합치기(merge, 큐에 이미 행이 있을 때의 기본 동작):** `--extract` 는 각 항목을 **Doc No + Date** 로 큐와 맞춰 보며 큐를 비우지 않습니다. 새 항목은 `Waiting` 으로 맨 끝에 추가됩니다. `Done` 행은 건드리지 않으며(옛 시트의 PDF 링크가 달라도 그대로 두고, 콘솔에 개수를 알려 줍니다), 그 밖의 행(`Waiting`, `Error…`)은 G열 상태는 유지하되 Date, Discipline, PDF URL, Folder URL, C/P(B~F열)를 옛 시트 값으로 갱신합니다. 큐에만 있는 행은 건드리지 않습니다. 옛 시트가 바뀌지 않았다면 다시 실행해도 아무것도 바뀌지 않으므로 예약 실행도 안전합니다. `--dry-run` 은 계획(`+N new, M updated, K unchanged, D Done kept as is`)을 보여 줍니다.
-- **옛 시트의 `No.`(A열)가 바뀐 경우:** `Doc No` = `No.` + `-` + Discipline + `-` + 칸의 값 이므로 `No.` 가 바뀌면 새 항목처럼 보입니다. `(Doc No, Date)` 로 맞춘 뒤에도 못 맞춘 항목은 **Date + Discipline + 칸의 값**(`No.` 를 뺀 부분)으로 한 번 더 맞춥니다. 맞으면 같은 항목으로 보고 큐의 `Doc No`(A열)를 **새 값으로 갱신**합니다(`Done` 행도 마찬가지이며, 상태와 `Done` 행의 나머지 열은 그대로 두고, `Waiting` / `Error…` 행은 B~F 열도 평소대로 갱신). 중복 행은 추가되지 않습니다. 콘솔에 `N renumbered` 가 표시되고 `--dry-run` 은 `sample (renumbered): row 5: 이전 -> 새 값` 을 보여 줍니다. **Date** 도 바뀌면 새 항목으로 취급합니다.
+- **맞추기(sync, 큐에 이미 행이 있을 때의 기본 동작):** `--extract` 는 **큐의 모든 행을 옛 시트에서 새로 계산**(Doc No, Date, Discipline, PDF URL, Folder URL, C/P. 행 순서는 옛 시트 순서)한 뒤 지금의 큐와 비교합니다. 같은 항목의 행이 이미 있으면 새 행은 **그 행의 상태를 그대로 유지**(G열: `Done`, `Error…`, `Waiting`)하고 나머지 열은 옛 시트를 따릅니다. **예외: 옛 시트에서 PDF(Drive file ID)가 바뀐 `Done` 행은 `Waiting` 으로 되돌아가고**, 옛 PDF 의 file ID 가 H열(`Replaces PDF (old file ID)`)에 기록되어 다음 마이그레이션이 새 파일을 읽고 옛 파일을 쓰던 DB 행을 바꿉니다("PMIS 를 옛 시트와 맞추기" 참고). 링크 형식만 바뀐 것(같은 file ID)은 새 PDF 가 아닙니다. 행이 없는 항목은 새 `Waiting` 행이 됩니다. 옛 시트에 더 이상 항목이 없는 기존 행은 **삭제**되어 큐는 항상 옛 시트와 같은 내용이 됩니다(삭제된 행 중 `Done` / `Error…` 였던 행 수를 콘솔이 경고합니다). 바뀐 것이 없으면 아무것도 쓰지 않으므로 예약 실행도 안전합니다. `--dry-run` 은 계획(`N kept (M changed, R renumbered, S set back to Waiting), +K new, D duplicate rows merged, X rows ... removed; statuses kept: ...`)을 보여 줍니다. 쓰기는 A~H열만 제자리에서 덮어씁니다(먼저 비우지 않으므로 중간에 실패해도 비지 않으며, `I` / `K` 열의 시각은 건드리지 않음). **안전장치:** 한도(행의 10% 와 100 중 큰 값)보다 많은 행을 지우게 되면 거부합니다(옛 시트가 잘못 비었을 때 큐를 보호). `--allow-large-removal` 로 허용할 수 있습니다.
+- **항목의 기존 행 찾기:** 같은 `(Doc No, Date)` 로, 또는(옛 시트의 `No.`(A열)만 바뀐 경우) 같은 **Date + Discipline + 칸의 값** 으로 찾습니다(`Doc No` = `No.` + `-` + Discipline + `-` + 칸의 값 이므로 `No.` 뒤쪽은 그대로입니다). 새 행은 새 `Doc No` 를 갖고 콘솔에 `N renumbered` 가 표시됩니다(`--dry-run` 은 `sample (renumbered): row 5: 이전 -> 새 값`). 한 항목에 **행이 여러 개**(예: 옛 `Doc No` 와 새 `Doc No` 로 두 번 들어간 경우)이면 처리된 행의 상태를 유지하는 하나로 합칩니다(`Done` > `Error…` > `Waiting`, 같으면 앞쪽 행). **Date** 도 바뀌면 새 항목으로 취급합니다.
 - **다시 만들기:** `--overwrite` 를 붙이면 큐를 비우고 모든 행을 `Waiting` 으로 다시 만듭니다(Apps Script 와 동일. 모든 `Done` / `Error…` 상태가 지워지니 G열을 먼저 백업하세요). 큐 탭이 없거나 비어 있으면 그냥 새로 만듭니다. 탭의 헤더 행이 `Doc No | Date | Discipline | PDF URL | Folder URL | Status(C/P) | AI Processed` 가 아니면, 고치거나 `--overwrite` 를 붙이기 전까지 `--extract` 는 아무것도 쓰지 않고 종료 코드 2 로 끝납니다.
 - **새로고침 시각:** 실제로 큐를 쓴 extract(`--dry-run` 제외)마다 `I1` = `Last extract (refresh time)`, `I2` = 태국 시간(UTC+7)의 시각(예: `2026-10-22 14:05:33 (UTC+7)`)이 기록되어 시트에서 마지막 새로고침 시점을 알 수 있습니다. I열은 큐 데이터(A~G열) 밖입니다.
 - **옛 탭이 다른 파일에 있을 때:** 기본은 옛 탭이 큐와 같은 스프레드시트에 있는 경우입니다. 다른 파일에서 읽으려면 `--legacy-spreadsheet <ID 또는 URL>` 을 쓰거나 `PMIS_LEGACY_SPREADSHEET_ID` 를 설정하세요. 큐는 계속 `PMIS_SPREADSHEET_ID` 에 기록됩니다. 그 파일을 서비스 계정과 공유하세요(보기 권한이면 충분).
@@ -93,9 +93,29 @@ python migrate_queue.py --extract --queue drq   # 한 큐만 (그 큐의 탭 이
 - Apps Script 와 다른 점: 큐 값을 일반 텍스트(`RAW`)로 기록하므로 날짜·숫자·앞자리 0 이 자동 변환되지 않고, 큐 시트의 값만 지우며(서식은 유지), 행을 append 로 추가하므로 시트가 알아서 늘어납니다.
 - 서비스 계정에는 스프레드시트 **편집자(Editor)** 권한이 필요합니다(옛 탭을 읽고 큐 탭에 기록). PDF 는 건드리지 않습니다.
 
+## PMIS 를 옛 시트와 맞추기
+
+목표: PMIS(큐와 `DB_DWR` / `DB_DRQ`)의 내용이 항상 옛 시트와 같아지는 것입니다. 흐름은 **옛 시트 -> (`--extract`) -> 큐 -> (마이그레이션) -> DB** 이고 `--sync-db` 가 더해집니다:
+
+| 옛 시트의 변경 | PMIS 에서 일어나는 일 |
+|---|---|
+| 새 항목 | `--extract` 가 `Waiting` 행을 추가하고, 다음 마이그레이션이 DB 행을 추가 |
+| `No.`(A열) 변경 | `--extract` 가 같은 항목의 `Doc No` 를 바꿈 (중복 행 없음) |
+| `Done` 항목의 PDF 변경 | `--extract` 가 행을 `Waiting` 으로 되돌리고 옛 file ID 를 H열에 기록. 다음 마이그레이션이 새 파일을 읽고 **옛 DB 행을 제자리에서 교체**(아래 참고). 실패하면 옛 DB 행은 그대로이고 H열도 유지 |
+| 항목의 PDF 링크를 지움 | `--extract` 는 행을 유지하고, `--sync-db` 가 그 PDF 의 DB 행을 지움(먼저 `_REMOVED_...` 에 복사). 링크가 다시 생기면 다시 마이그레이션(DB 에 새 행) |
+| C/P 변경 | `--sync-db` 가 DB 의 C/P 열(DB_DWR 은 `T`, DB_DRQ 는 `S`)을 갱신 |
+| 항목 삭제 | `--extract` 가 큐 행을 지우고, `--sync-db` 가 옛 시트와 맞춘 적이 있는(`Synced` 표시) DB 행 중 PDF 가 큐에 더 이상 없는 것을 지움 |
+
+- **제자리 교체:** 옛 파일을 쓰던 DB 행(옛 file ID 로 찾음)을 같은 행에서 새 데이터로 덮어씁니다. 마이그레이션 데이터가 아닌 열은 건드리지 않습니다: A열(`CSC Ref. No`)과 비어 있는 `Ext1` / `Ext2`. 다른 큐 행이 아직 옛 PDF 를 쓰고 있거나 옛 파일이 DB 에 없으면 새 행을 추가합니다. 행이 `Done` 이 되면 H열을 비웁니다.
+- **`--sync-db`**(`python migrate_queue.py --sync-db`, 또는 큐를 맞춘 직후 실행되는 `--extract --sync-db`. `--dry-run` 이면 계획된 행 기준): PDF file ID 가 큐에 더 이상 없는 DB 행을 지웁니다. **Status 가 `AI Migrated` 이고 `Legacy sync` 가 `Synced` 인 행만**, 즉 옛 시트와 맞춘 적이 있는데 옛 시트에서 사라진 행만 지우며(사람이 직접 넣은 행, 그리고 옛 시트에서 온 적이 없는 행, 예를 들어 다른 시스템이 넣은 문서는 절대 지우지 않음) H열에서 교체를 기다리는 PDF 의 행은 남깁니다. **지우기 전에 행을 `_REMOVED_DB_DWR` / `_REMOVED_DB_DRQ` 탭에 복사**하므로(시각, 탭, 원래 행 번호, 이유, 원래 셀 전부. 탭이 없으면 만듦) 아무것도 잃지 않습니다. 또한 C/P 열을 큐의 값으로 갱신합니다(큐의 C/P 가 비어 있으면 DB 값을 지우지 않고, 큐에서 같은 PDF 의 C/P 가 서로 다르면 건너뜀). 쓰기 직전에 PDF 열을 다시 읽어, 그사이 행이 끼어들거나 사라졌으면 아무것도 바꾸지 않고 중단합니다.
+- **안전장치:** 큐에 행이 없거나 지울 행이 한도(DB 행의 10% 와 100 중 큰 값)를 넘으면 그 DB 에는 아무것도 쓰지 않습니다(`--allow-large-removal` 로 해제, `--dry-run` 은 이 때문에 실패하지 않음). 행이 실제로 삭제되므로 위치로 DB 행을 참조하는 다른 시트는 밀릴 수 있습니다. 먼저 `--dry-run` 으로 계획을 확인하세요.
+- **GitHub Actions 에서:** workflow **Extract queue** 는 `--extract` 를 실행하고, `sync_db` 입력(기본 켜짐)이 켜져 있으면 각 큐 뒤에 `--sync-db` 를 실행합니다. 먼저 `mode = dry-run` 으로 실행하세요. 로그에는 집계 숫자만 나옵니다.
+- **`Legacy sync` 표시:** PDF 가 큐(= 옛 시트)에 있는 DB 행에는 C/P 열 바로 뒤의 열(**`DB_DWR` 은 `U`, `DB_DRQ` 는 `T`**, 머리글 `Legacy sync`)에 `Synced` 가 붙습니다. **고아 행에는 표시가 없습니다**: PDF 가 큐에 더 이상 없는 행, 이 도구가 쓴 행이 아니라(Status 가 `AI Migrated` 가 아님, 그래서 지우지도 않음) 그대로 둔 행, PDF 링크가 없는 행은 비어 있고, 더 이상 사실이 아닌 표시는 지워집니다. 교체를 기다리며 옛 버전으로 남아 있는 행(그 PDF 가 큐의 H열에 있음)은 지금 값을 그대로 둡니다. 표시는 어느 행이 옛 시트에서 왔는지의 기억이기도 합니다: **표시가 붙은 적 없는 행은 절대 지워지지 않으므로** 다른 시스템이 넣은 문서나 옛 시트에 없는 행은 남습니다. 그래서 처음 실행하는 `--sync-db` 는 표시만 붙이고(아무것도 지우지 않음), 표시가 붙었다가 옛 시트에서 사라진 행만 지웁니다. `--sync-db` 는 실행할 때마다 표시를 바로잡고(바뀌는 셀만 쓰므로 두 번째 실행은 아무것도 쓰지 않음), migrate 가 쓰는 행(새 행과 교체한 행)은 쓰는 순간 `Synced` 가 붙습니다. 첫 표시를 쓰기 전에 C/P 열처럼 머리글을 확인합니다: 비어 있으면 `Legacy sync` 를 채우고, 다른 머리글이면 그 DB 를 중단합니다. 삭제된 행은 `_REMOVED_...` 복사본에 표시가 그대로 남습니다.
+- **그대로 두는 것:** 같은 PDF(또는 같은 Doc No)의 DB 행이 여러 개인 것은 건드리지 않습니다. 옛 시트와 맞춘 적이 있는데 큐에 더 이상 없는 PDF 만 지웁니다. `--extract` 가 읽지 않는 `BD` / `BF` 이후 열의 PDF 는 큐에 없으며, 그 행은 전에 표시가 붙은 적이 있을 때만 지워집니다.
+
 ## DB 의 C/P: `T`열(DWR) / `S`열(DRQ)과 `--backfill-cp`
 
-마이그레이션이 `DB_DWR` / `DB_DRQ` 에 쓰는 모든 행에는 큐 행의 **C/P** 값(F열 `Status(C/P)`)이 그대로 복사되어 **`DB_DWR` 의 T열**과 **`DB_DRQ` 의 S열**(둘 다 머리글 `Status (C/P)`)에 들어갑니다. 기존 열은 움직이지 않습니다: `DB_DWR` 은 계속 A~S(`Folder Link` 가 S)이고, `DB_DRQ` 의 새 열은 `Folder Link`(P)와 `Ext1` / `Ext2`(Q, R) 바로 뒤에 옵니다.
+마이그레이션이 `DB_DWR` / `DB_DRQ` 에 쓰는 모든 행에는 큐 행의 **C/P** 값(F열 `Status(C/P)`)이 그대로 복사되어 **`DB_DWR` 의 T열**과 **`DB_DRQ` 의 S열**(둘 다 머리글 `Status (C/P)`)에 들어가고, 그 뒤에 `Legacy sync` 표시 열(`DB_DWR` 은 `U`, `DB_DRQ` 는 `T`. "PMIS 를 옛 시트와 맞추기" 참고)이 옵니다. 기존 열은 움직이지 않습니다: `DB_DWR` 은 계속 A~S(`Folder Link` 가 S)이고, `DB_DRQ` 의 새 열은 `Folder Link`(P)와 `Ext1` / `Ext2`(Q, R) 바로 뒤에 옵니다.
 
 - 새 행을 처음 쓰기 전에 DB 탭의 머리글 칸(`DB_DWR` 은 `T1`, `DB_DRQ` 는 `S1`)을 확인합니다: 비어 있으면 `Status (C/P)` 를 채우고, 같은 머리글이면 그대로 두며, **다른 머리글이면 그 큐를 중단**합니다(`✗ Could not process queue ...`). 값이 다른 열 아래에 들어가지 않게 하기 위함입니다.
 - 이미 DB 에 있는 행에는 C/P 가 없습니다. `--backfill-cp` 로 채우세요(Drive / Gemini 호출 없음, `GEMINI_API_KEY` 불필요):
@@ -122,7 +142,7 @@ PDF 가 `--max-mb` 보다 큰 행은 표지 이미지만 전송한다는 `ℹ` �
 
 ## GitHub Actions 에서 실행
 
-workflow 두 개가 같은 스크립트를 GitHub 호스팅 러너에서 실행하므로 PC 를 켜 둘 필요가 없습니다: `.github/workflows/migrate.yml` (**Migrate queue**: PDF -> Gemini -> DB) 과 `.github/workflows/extract.yml` (**Extract queue**: 옛 시트에서 큐 만들기/합치기, `--extract`). GitHub Free 플랜의 private 저장소는 매달 Actions 2,000분을 받습니다.
+workflow 두 개가 같은 스크립트를 GitHub 호스팅 러너에서 실행하므로 PC 를 켜 둘 필요가 없습니다: `.github/workflows/migrate.yml` (**Migrate queue**: PDF -> Gemini -> DB) 과 `.github/workflows/extract.yml` (**Extract queue**: 옛 시트에서 큐 만들기/맞추기(sync), `--extract`). GitHub Free 플랜의 private 저장소는 매달 Actions 2,000분을 받습니다.
 
 최초 1회 설정:
 
@@ -140,7 +160,7 @@ gh variable set PMIS_SPREADSHEET_ID --body "<스프레드시트 ID>"            
 
 마이그레이션: Actions 탭 > **Migrate queue** > Run workflow 에서 `mode` 를 고릅니다. 먼저 `dry-run`, 다음 `check-access`, 그다음 작은 `limit` 으로 `run`, 이어서 더 크게. 명령줄에서는 `gh workflow run migrate.yml -f mode=dry-run`.
 
-큐 만들기: Actions 탭 > **Extract queue** > Run workflow 에서 먼저 `mode = dry-run`(옛 탭을 읽고 아무것도 쓰지 않음), 그다음 `mode = extract`. `queue` 는 DWR / DRQ / 둘 다, `legacy_spreadsheet` 는 다른 파일 지정, `overwrite` 는 합치지 않고 처음부터 다시 만듭니다(예약 실행에서는 끄세요). 명령줄에서는 `gh workflow run extract.yml -f mode=dry-run`.
+큐 만들기: Actions 탭 > **Extract queue** > Run workflow 에서 먼저 `mode = dry-run`(옛 탭을 읽고 아무것도 쓰지 않음), 그다음 `mode = extract`. `queue` 는 DWR / DRQ / 둘 다, `legacy_spreadsheet` 는 다른 파일 지정, `sync_db`(기본 켜짐)는 각 큐 뒤에 DB_DWR / DB_DRQ 도 큐에 맞추고, `allow_large_removal` 은 안전 한도를 풀며, `overwrite` 는 맞추지 않고 처음부터 다시 만듭니다(예약 실행에서는 끄세요). 명령줄에서는 `gh workflow run extract.yml -f mode=dry-run`.
 
 - 단위 테스트(`test` 잡)가 먼저 실행되며, 통과해야 마이그레이션 / extract 가 시작됩니다.
 - 두 실행이 겹치지 않으며(마이그레이션과 extract 도 같은 `concurrency` 그룹) 같은 `Waiting` 행이 두 번 처리되지 않습니다.
@@ -183,7 +203,8 @@ migrator/
   processing.py         one row: Drive PDF -> Gemini -> DB row
   sheets.py drive.py gemini.py     the three APIs
   reports.py            parsing Gemini's JSON, building the DB rows
-  extract.py            --extract (legacy_sheet.py reads, queue_writer.py writes / merges)
+  extract.py            --extract (legacy_sheet.py reads, queue_writer.py writes / syncs)
+  db_sync.py            --sync-db (remove DB rows not in the queue, update C/P) and replacing a DB row in place
   cp_column.py          the C/P column of the DB tabs (T in DB_DWR, S in DB_DRQ): header check, --backfill-cp
   stamps.py             the refresh time (I1:I2) and the migration time (K1:K2) in the queue sheet
   specs.py config.py models.py utils.py clock.py

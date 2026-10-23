@@ -40,6 +40,11 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com"
 # [TH] คอลัมน์สถานะ = คอลัมน์ G (AI Processed)
 # [EN] Status column = column G (AI Processed)
 STATUS_COL = 7
+# 한 번에 지울 수 있는 행 수의 상한: 전체의 10% 와 100행 중 큰 쪽 (옛 시트가 잘못 비어 큐/DB 가 대량으로 지워지는 사고를 막는 안전장치)
+# [TH] เพดานจำนวนแถวที่ลบได้ในครั้งเดียว: 10% ของทั้งหมดหรือ 100 แถว แล้วแต่ค่าไหนมากกว่า (กันอุบัติเหตุที่ชีตเก่าว่างผิดปกติแล้วคิว/DB ถูกลบเป็นจำนวนมาก)
+# [EN] The cap on how many rows one run may remove: 10% of all rows or 100 rows, whichever is larger (a safety net so that a wrongly emptied legacy sheet cannot wipe the queue / DB)
+MAX_REMOVAL_PERCENT = 10
+MIN_REMOVAL_LIMIT = 100
 
 # 오류 메시지 길이 제한 (셀 하나에 너무 길게 쓰지 않도록)
 # [TH] จำกัดความยาวข้อความ error (ไม่ให้ยาวเกินไปในเซลล์เดียว)

@@ -1,5 +1,9 @@
-# Build the MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ queues from the legacy sheets (--extract).
-# Running the migration itself (PDF -> Gemini -> DB) is a separate workflow: migrate.yml
+# Keep PMIS in sync with the legacy sheets: build / sync the MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ queues from them (--extract) and, right after each
+# queue, make DB_DWR / DB_DRQ match it (--sync-db, input sync_db). Running the migration itself (PDF -> Gemini -> DB) is a separate workflow: migrate.yml
+#
+# The whole chain: legacy sheet --extract--> queue --migrate--> DB, and --sync-db removes the DB rows that were synced with the legacy sheet (tag 'Synced') but whose PDF is not in the queue any more (copied to a
+# _REMOVED_<tab> tab first), updates C/P and tags the rows that match the legacy sheet (column 'Legacy sync' = Synced; an orphan row has no tag). A Done row whose PDF changed in the legacy sheet goes back to Waiting, so the next migrate.yml reads the new file
+# and replaces the old DB row in place.
 #
 # Required repository secret (Settings > Secrets and variables > Actions > Secrets):
 #   SA_KEY_JSON                 the whole contents of the service-account key file (.json)
@@ -15,8 +19,10 @@
 #                               Share that file with the service account (Viewer is enough).
 # Variables are not masked in the log, so the script never prints them (--public-log), and the legacy file's ID / URL is masked explicitly.
 #
-# Start with mode = dry-run (reads the legacy tabs, writes nothing), then run with mode = extract.
-# A queue that already has rows is MERGED (statuses kept, new items appended); overwrite rebuilds it from scratch.
+# Start with mode = dry-run (reads the legacy tabs and the DB, writes nothing), then run with mode = extract.
+# Safety net: a run that would remove more rows than the limit (the larger of 10% of the rows and 100) from the queue or a DB is refused; allow_large_removal lifts it.
+# A queue that already has rows is SYNCED (every row is recomputed from the legacy sheet and the status of the existing row is kept);
+# overwrite rebuilds it from scratch (every row Waiting).
 # The log shows counts only (--public-log); run the script locally to see the names and Doc Nos.
 name: Extract queue
 
@@ -24,7 +30,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "dry-run = read the legacy tabs and show the plan, write nothing | extract = build / merge the queues"
+        description: "dry-run = read the legacy tabs and show the plan, write nothing | extract = build / sync the queues"
         type: choice
         options: [dry-run, extract]
         default: dry-run
@@ -38,7 +44,15 @@ on:
         type: string
         default: ""
       overwrite:
-        description: "Rebuild the queue from scratch instead of merging (clears it: every row becomes Waiting and every Done/Error status is wiped). Normally leave this off"
+        description: "Rebuild the queue from scratch instead of syncing (clears it: every row becomes Waiting and every Done/Error status is wiped). Normally leave this off"
+        type: boolean
+        default: false
+      sync_db:
+        description: "Also make DB_DWR / DB_DRQ match the queue after each queue is synced: remove the DB rows that were synced with the legacy sheet and whose PDF is not in the queue any more (copied to a _REMOVED_<tab> tab first; a row that never came from the legacy sheet is kept) and update C/P. Turn off to sync only the queue"
+        type: boolean
+        default: true
+      allow_large_removal:
+        description: "Allow removing more rows than the safety limit (the larger of 10% of the rows and 100). Normally leave this off"
         type: boolean
         default: false
 
@@ -80,6 +94,8 @@ jobs:
           IN_QUEUE: ${{ inputs.queue || 'both' }}
           IN_LEGACY_SPREADSHEET: ${{ inputs.legacy_spreadsheet || '' }}
           IN_OVERWRITE: ${{ inputs.overwrite || false }}
+          IN_SYNC_DB: ${{ inputs.sync_db }}
+          IN_ALLOW_LARGE_REMOVAL: ${{ inputs.allow_large_removal || false }}
           SA_KEY_JSON: ${{ secrets.SA_KEY_JSON }}
           # variable first, then the secret of the same name (the old way) as a fallback
           PMIS_SPREADSHEET_ID: ${{ vars.PMIS_SPREADSHEET_ID || secrets.PMIS_SPREADSHEET_ID }}
@@ -111,6 +127,9 @@ jobs:
           if [[ "$IN_QUEUE" != drq && -z "$PMIS_LEGACY_DWR_SHEET" ]]; then die "Variable PMIS_LEGACY_DWR_SHEET is missing or empty (needed to build the DWR queue)"; fi
           if [[ "$IN_QUEUE" != dwr && -z "$PMIS_LEGACY_DRQ_SHEET" ]]; then die "Variable PMIS_LEGACY_DRQ_SHEET is missing or empty (needed to build the DRQ queue)"; fi
           [[ "$IN_OVERWRITE" != "true" ]] || args+=(--overwrite)
+          # sync_db is on unless it is explicitly false (an API call that leaves the input out gets the default, on)
+          [[ "${IN_SYNC_DB:-true}" == "false" ]] || args+=(--sync-db)
+          [[ "$IN_ALLOW_LARGE_REMOVAL" != "true" ]] || args+=(--allow-large-removal)
 
           # The legacy file may be given as an ID or a URL; hide both forms from the log (the Running: line below prints the arguments)
           for legacy_value in "$IN_LEGACY_SPREADSHEET" "$PMIS_LEGACY_SPREADSHEET_ID"; do
@@ -129,7 +148,7 @@ jobs:
           status=${PIPESTATUS[0]}
           set -e
           if [[ $status -ne 0 ]]; then
-            echo "::error::migrate_queue.py exited with code $status (2 = a queue could not be built, or it was left untouched because its header row is not the expected one - fix it or use overwrite). Run the script locally for the full log."
+            echo "::error::migrate_queue.py exited with code $status (2 = a queue could not be built, or it was left untouched because its header row is not the expected one - fix it or use overwrite, or a queue / DB was refused by the safety net: too many rows to remove - check the legacy sheet, then use allow_large_removal). Run the script locally for the full log."
           fi
           exit "$status"
 

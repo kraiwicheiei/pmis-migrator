@@ -47,6 +47,14 @@ class Resp:
         return self._body
 
 
+def column_index(letters):
+    """A -> 0, T -> 19, AA -> 26 / [TH] ตัวอักษรคอลัมน์เป็น index (เริ่ม 0) / [EN] Column letters to a 0-based index"""
+    n = 0
+    for ch in letters:
+        n = n * 26 + ord(ch) - 64
+    return n - 1
+
+
 class FakeWorld:
     """
     메모리 안의 가짜 시트 + Drive + Gemini
@@ -79,6 +87,10 @@ class FakeWorld:
         # DB 탭의 C/P 열 머리글(DWR 은 T1, DRQ 는 S1) 현재 값 / [TH] ค่าปัจจุบันของหัวตารางคอลัมน์ C/P (T1) ในแท็บ DB / [EN] The current value of the header (T1) of the C/P column of the DB tab
         self.cp_header = ""
         self.cp_header_writes = []
+        # "Legacy sync" 표시 열의 머리글 (DB_DWR 은 U1) / [TH] หัวตารางของคอลัมน์ป้าย "Legacy sync" (DB_DWR คือ U1) / [EN] The header of the "Legacy sync" tag column (U1 in DB_DWR)
+        self.sync_header = ""
+        self.sync_header_writes = []
+        self.batch_inputs = []
         self.lock = threading.Lock()
 
     # --- sheets session ---
@@ -92,13 +104,19 @@ class FakeWorld:
                 return Resp(200, {"values": [[r[17]] for r in self.db[1:] if len(r) > 17]})
             if a1 in ("'DB_DWR'!T1", "'DB_DRQ'!S1"):
                 return Resp(200, {"values": [[self.cp_header]]} if self.cp_header else {})
+            if a1 in ("'DB_DWR'!U1", "'DB_DRQ'!T1"):
+                return Resp(200, {"values": [[self.sync_header]]} if self.sync_header else {})
             if a1 == "'DB_DWR'!A1:T":
                 return Resp(200, {"values": self.db})
             raise AssertionError(a1)
-        if method == "PUT" and (path.endswith("!T1") or path.endswith("!S1")):
+        if method == "PUT" and re.search(r"'DB_(DWR'!(T|U)|DRQ'!(S|T))1$", path):
             assert kw["params"]["valueInputOption"] == "RAW"
-            self.cp_header = kw["json"]["values"][0][0]
-            self.cp_header_writes.append(self.cp_header)
+            if re.search(r"'DB_DWR'!U1$|'DB_DRQ'!T1$", path):                       # the "Legacy sync" header
+                self.sync_header = kw["json"]["values"][0][0]
+                self.sync_header_writes.append(self.sync_header)
+            else:                                                                      # the C/P header
+                self.cp_header = kw["json"]["values"][0][0]
+                self.cp_header_writes.append(self.cp_header)
             return Resp(200, {})
         if method == "PUT" and path.endswith("!K1:K2"):
             assert kw["params"]["valueInputOption"] == "RAW"
@@ -116,19 +134,18 @@ class FakeWorld:
             return Resp(200, {})
         if method == "POST" and path.endswith("values:batchUpdate"):
             self.batch_updates.append(kw["json"]["data"])
+            self.batch_inputs.append(kw["json"]["valueInputOption"])
             for item in kw["json"]["data"]:
-                m = re.fullmatch(r"'(.+)'!([GTS])(\d+)", item["range"])
-                tab, col, row = m.group(1), m.group(2), int(m.group(3))
-                if col == "G":                                   # the status column of the queue sheet
-                    assert tab.startswith("MIGRATION_QUEUE")
-                    while len(self.queue[row - 1]) < 7:
-                        self.queue[row - 1].append("")
-                    self.queue[row - 1][6] = item["values"][0][0]
-                else:                                            # the C/P column of a DB tab (T for DB_DWR, S for DB_DRQ)
-                    assert tab.startswith("DB_")
-                    while len(self.db[row - 1]) < 20:
-                        self.db[row - 1].append("")
-                    self.db[row - 1][19] = item["values"][0][0]
+                m = re.fullmatch(r"'(.+)'!([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?", item["range"])
+                tab, first_col, row = m.group(1), column_index(m.group(2)), int(m.group(3))
+                assert m.group(5) in (None, m.group(3))                                # one row per range
+                store = self.queue if tab.startswith("MIGRATION_QUEUE") else self.db      # the queue statuses / column H, or cells of a DB tab (C/P, a replaced row)
+                assert tab.startswith(("MIGRATION_QUEUE", "DB_"))
+                values = item["values"][0]
+                while len(store[row - 1]) < first_col + len(values):
+                    store[row - 1].append("")
+                for offset, value in enumerate(values):
+                    store[row - 1][first_col + offset] = value
             return Resp(200, {})
         raise AssertionError((method, url))
 

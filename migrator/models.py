@@ -29,6 +29,10 @@ class Job:
     # [TH] คอลัมน์ F ของชีตคิว (Status(C/P)) เขียนลงคอลัมน์ C/P ของ DB ตามเดิม
     # [EN] Column F of the queue sheet (Status(C/P)): written as it is to the C/P column of the DB
     cp: str = ""
+    # 큐 시트 H열: 링크가 바뀌기 전 PDF 의 file ID. DB 에서 이 PDF 를 쓰던 행을 새 데이터로 제자리에서 바꾸는 데 사용
+    # [TH] คอลัมน์ H ของชีตคิว: file ID ของ PDF ก่อนที่ลิงก์จะเปลี่ยน ใช้หาแถวใน DB ที่ใช้ PDF นั้นเพื่อแทนที่ด้วยข้อมูลใหม่ในที่เดิม
+    # [EN] Column H of the queue sheet: the file ID of the PDF before its link changed. Used to find the DB row that used that PDF and replace it in place with the new data
+    replaces: str = ""
 
 
 @dataclass

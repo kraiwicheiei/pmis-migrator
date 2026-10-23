@@ -9,7 +9,7 @@ import random
 import re
 from typing import Any, Optional
 
-from .config import MAX_ERROR_CHARS
+from .config import MAX_ERROR_CHARS, MAX_REMOVAL_PERCENT, MIN_REMOVAL_LIMIT
 
 
 _ID_PATTERNS = (
@@ -81,3 +81,12 @@ def col_letter(n: int) -> str:
         n, r = divmod(n - 1, 26)
         s = chr(65 + r) + s
     return s
+
+
+def removal_limit(total: int) -> int:
+    """
+    한 번에 지울 수 있는 최대 행 수: 전체 행의 10% 와 100 중 큰 값
+    [TH] จำนวนแถวสูงสุดที่ลบได้ในครั้งเดียว: ค่าที่มากกว่าระหว่าง 10% ของแถวทั้งหมดกับ 100
+    [EN] The most rows one run may remove: the larger of 10% of all rows and 100
+    """
+    return max(MIN_REMOVAL_LIMIT, -(-total * MAX_REMOVAL_PERCENT // 100))

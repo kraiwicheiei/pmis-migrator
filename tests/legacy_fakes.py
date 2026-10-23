@@ -102,6 +102,8 @@ class FakeLegacy:
         self.refresh_error = False
         self.updated_rows = []
         self.renamed_rows = []
+        # 큐 탭의 시트 행 수 (옛 탭은 row_count) / [TH] จำนวนแถวของแท็บคิวในชีต (แท็บเก่าใช้ row_count) / [EN] The sheet's row count of a queue tab (the legacy tabs use row_count)
+        self.queue_row_count = row_count
         self.row_count = row_count
         self.events = []
         self.grid_reads = []
@@ -135,13 +137,19 @@ class FakeLegacy:
                     rows.pop()
                 block = {"startRow": r1 - 1, "rowData": [{"values": r} if r else {} for r in rows]}
                 return Resp(200, {"sheets": [{"data": [block]}]})
-            return Resp(200, {"sheets": [{"properties": {"sheetId": i, "title": t, "gridProperties": {"rowCount": self.row_count}}}
+            return Resp(200, {"sheets": [{"properties": {"sheetId": i, "title": t, "gridProperties": {"rowCount": self.queue_row_count if t in self.queues else self.row_count}}}
                                           for i, t in enumerate(self.tab_names("SID"))]})
         if method == "GET" and "/values/" in path:
-            tab = re.match(r"'(.+)'!A:G$", path.split("/values/")[1]).group(1)
+            tab = re.match(r"'(.+)'!A:[GH]$", path.split("/values/")[1]).group(1)
             return Resp(200, {"values": self.queues[tab]}) if tab in self.queues else Resp(400, text="Unable to parse range")
         if method == "POST" and path == base + ":batchUpdate":
-            title = kw["json"]["requests"][0]["addSheet"]["properties"]["title"]
+            request = kw["json"]["requests"][0]
+            if "appendDimension" in request:                       # the sheet is grown before more rows than it has are written
+                assert request["appendDimension"]["dimension"] == "ROWS"
+                self.queue_row_count += request["appendDimension"]["length"]
+                self.events.append(("grow", request["appendDimension"]["length"]))
+                return Resp(200, {})
+            title = request["addSheet"]["properties"]["title"]
             self.events.append(("addSheet", title))
             self.queues[title] = []
             return Resp(200, {})
@@ -164,7 +172,14 @@ class FakeLegacy:
             self.events.append(("update", tab, len(kw["json"]["data"])))
             return Resp(200, {})
         if method == "POST" and path.endswith(":clear"):
-            tab = path.split("/values/")[1][:-len(":clear")].strip("'")
+            target = path.split("/values/")[1][:-len(":clear")]
+            tail = re.fullmatch(r"'(.+)'!A(\d+):[GH](\d+)", target)
+            if tail:                                               # only the leftover tail rows A{n}:G{m}
+                tab, first = tail.group(1), int(tail.group(2))
+                del self.queues[tab][first - 1:int(tail.group(3))]
+                self.events.append(("clear_tail", tab, first))
+                return Resp(200, {})
+            tab = target.strip("'")
             self.events.append(("clear", tab))
             self.queues[tab] = []
             return Resp(200, {})
@@ -179,10 +194,24 @@ class FakeLegacy:
             return Resp(200, {})
         if method == "PUT" and "/values/" in path:
             assert params["valueInputOption"] == "RAW"
-            tab = re.match(r"'(.+)'!A1:G1$", path.split("/values/")[1]).group(1)
-            self.events.append(("header", tab))
-            self.queues[tab] = [list(kw["json"]["values"][0])]
-            self.written += kw["json"]["values"]
+            m = re.fullmatch(r"'(.+)'!A(\d+):([GH])(\d+)", path.split("/values/")[1])
+            tab, first, last, width = m.group(1), int(m.group(2)), int(m.group(4)), 7 if m.group(3) == "G" else 8
+            values = kw["json"]["values"]
+            assert last - first + 1 == len(values) and all(len(v) == width for v in values)
+            queue = self.queues[tab]
+            if first == 1:                                         # the header; the rows below it are not touched
+                self.events.append(("header", tab))
+                if queue:
+                    queue[0] = list(values[0])
+                else:
+                    queue.append(list(values[0]))
+            else:                                                  # rows written in place
+                self.events.append(("put", tab, first, len(values)))
+                while len(queue) < last:
+                    queue.append([])
+                for offset, v in enumerate(values):
+                    queue[first - 1 + offset] = list(v)
+            self.written += values
             return Resp(200, {})
         if method == "POST" and path.endswith(":append"):
             assert params["valueInputOption"] == "RAW" and params["insertDataOption"] == "INSERT_ROWS"
@@ -254,3 +283,11 @@ def extract_main(monkeypatch, argv, w=None, env=None, need=None):
 
 # --- 옛 시트를 다른 스프레드시트 파일에서 읽기 / legacy tabs in another file / อ่านแท็บเก่าจากไฟล์สเปรดชีตอื่น ---
 LEGACY_FILE = "LEGACYFILEID123"
+
+
+def core(rows):
+    """
+    행의 앞 7열(A~G): H열(교체 대기)이 생기기 전의 큐 모양 / [TH] 7 คอลัมน์แรก (A~G) ของแถว: หน้าตาของคิวก่อนมีคอลัมน์ H (รอแทนที่)
+    [EN] The first 7 columns (A-G) of the rows: the queue as it was before column H (waiting to replace) existed
+    """
+    return [list(r[:7]) for r in rows]

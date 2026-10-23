@@ -51,7 +51,9 @@ def test_new_db_rows_carry_the_queue_cp_in_column_t():
     s = run(ns(), w.clients(), log=logs.append)
     assert s.done == 3
     assert [r[19] for r in w.db[1:]] == ["C", "P", ""]                                   # as the queue says, an empty one stays empty
-    assert [r[17] for r in w.db[1:]] == [URL(1), URL(2), URL(3)] and [len(r) for r in w.db[1:]] == [20, 20, 20]
+    assert [r[17] for r in w.db[1:]] == [URL(1), URL(2), URL(3)] and [len(r) for r in w.db[1:]] == [21, 21, 21]
+    assert [r[20] for r in w.db[1:]] == ["Synced"] * 3                                    # every row migrate writes is in sync with the legacy sheet
+    assert w.sync_header == "Legacy sync" and any("Wrote the header 'Legacy sync' to DB_DWR!U1" in m for m in logs)
     assert w.cp_header == DB_CP_HEADER and any("Wrote the header 'Status (C/P)' to DB_DWR!T1" in m for m in logs)
 
 
