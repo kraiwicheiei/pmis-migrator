@@ -32,7 +32,7 @@ def test_plan_removes_only_the_rows_that_were_synced_and_whose_pdf_is_gone_and_k
     db = [db_row(1, "C"), db_row(2, "C"), db_row(3, tag="Synced"), db_row(4, status="Manual"), db_row(6)]
     plan = plan_db_sync(queue, [["h"] * 20] + db, DWR)
     assert plan.removals.keys() == {4} and "is not in MIGRATION_QUEUE any more" in plan.removals[4]        # DB row 4 = db_row(3): it was synced and its PDF 3 is not in the queue
-    assert plan.protected == 1 and plan.cp_updates == {3: "P"} and plan.rows == 5                           # db_row(4) is not an 'AI Migrated' row: protected; db_row(2) has C but the queue says P
+    assert plan.protected == 1 and plan.cp_updates == {3: "P"} and plan.rows == 5                           # db_row(4) is not an 'AI Synced' row: protected; db_row(2) has C but the queue says P
     assert plan.unsynced == 1 and 6 not in plan.removals and 6 not in plan.tag_updates                      # db_row(6) never came from the legacy sheet (no tag): kept, still untagged
 
 
@@ -411,3 +411,33 @@ def test_replace_db_rows_overwrites_in_place_with_the_same_input_mode_as_an_appe
     w2 = db_world([qrow8(1)], [db_row(1)])
     replace_db_rows(w2.clients().sheets, "SID", DWR, [(2, new)])
     assert w2.inputs == ["USER_ENTERED"]
+
+
+# --- Status 이름 변경 / the Status rename / การเปลี่ยนชื่อ Status ---
+def test_the_status_value_is_ai_synced_and_the_old_name_still_counts_as_written_by_this_tool():
+    assert MIGRATED_STATUS == "AI Synced" and db_sync.MIGRATED_STATUSES == ("AI Synced", "AI Migrated")
+    queue = [qrow8(1, "C"), qrow8(2, "C")]
+    db = [db_row(1, "C", status="AI Migrated"), db_row(2, "C", status="AI Synced", tag="Synced"), db_row(3, status="AI Migrated", tag="Synced"), db_row(4, status="Typed by a person")]
+    plan = plan_db_sync(queue, [["h"] * 21] + db, DWR)
+    assert plan.status_updates == {2: "AI Synced"}                                          # the old name on a row that stays is renamed; db_row(3) is about to be removed, so it is not
+    assert plan.removals.keys() == {4} and plan.protected == 1                              # the old name still lets the row be removed (it was synced); the person's row is kept
+
+
+def test_sync_renames_the_old_status_in_place_logs_it_and_is_idempotent():
+    queue = [qrow8(1, "C"), qrow8(2, "C")]
+    w = db_world(queue, [db_row(1, "C", status="AI Migrated", tag="Synced"), db_row(2, "C", status="AI Synced", tag="Synced"), db_row(5, status="Typed by a person")])
+    col = db_sync.db_status_col(DWR)
+    summary, logs = sync(w, queue)
+    assert [r[col] for r in w.tabs["DB_DWR"][1:]] == ["AI Synced", "AI Synced", "Typed by a person"]        # only the old-name row changed; the person's value is untouched
+    assert summary.status_renamed == 1 and count_rows(logs)["Status to rename"].startswith("1")
+    assert any("Renamed Status in DB_DWR!Q: 1 rows ('AI Migrated' -> 'AI Synced')" in m for m in logs)
+    summary, logs = sync(w, queue)                                                         # a second run has nothing left to do
+    assert summary.status_renamed == 0 and any("already matches the queue" in m for m in logs)
+
+
+def test_a_dry_run_shows_the_rename_but_writes_nothing():
+    queue = [qrow8(1, "C")]
+    w = db_world(queue, [db_row(1, "C", status="AI Migrated", tag="Synced")])
+    summary, logs = sync(w, queue, dry_run=True)
+    assert w.tabs["DB_DWR"][1][db_sync.db_status_col(DWR)] == "AI Migrated" and summary.status_renamed == 0
+    assert count_rows(logs)["Status to rename"].startswith("1")

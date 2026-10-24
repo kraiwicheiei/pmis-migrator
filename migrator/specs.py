@@ -50,6 +50,14 @@ DB_CP_HEADER = "Status (C/P)"
 DB_SYNC_HEADER = "Legacy sync"
 DB_SYNC_VALUE = "Synced"
 DB_OUTDATED_VALUE = "Outdated"
+# DB 의 Status 열 값: 이 도구가 쓴 행의 표시. 이관(migrate)이 동기화(sync)가 되면서 "AI Migrated" 에서 "AI Synced" 로 바뀜.
+# 옛 이름의 행은 계속 이 도구가 쓴 행으로 인정되고, `sync db` 가 새 이름으로 바꿔 줌
+# [TH] ค่าในคอลัมน์ Status ของ DB: ป้ายของแถวที่เครื่องมือนี้เขียน เมื่อ migrate กลายเป็น sync ชื่อเปลี่ยนจาก "AI Migrated" เป็น "AI Synced"
+#      แถวที่ใช้ชื่อเก่ายังถือว่าเป็นแถวที่เครื่องมือนี้เขียน และ `sync db` จะเปลี่ยนให้เป็นชื่อใหม่
+# [EN] The Status value of the DB rows this tool wrote. When migrate became sync it was renamed from "AI Migrated" to "AI Synced".
+#      Rows with the old name still count as written by this tool, and `sync db` renames them to the new one
+DB_STATUS_VALUE = "AI Synced"
+DB_STATUS_LEGACY_VALUE = "AI Migrated"
 
 
 @dataclass(frozen=True)
@@ -103,7 +111,7 @@ SPECS = {
             ("field", "Total_Manpower"), ("field", "Total_Equipment"),
             ("json", "Manpower_Details"), ("json", "Equipment_Details"),
             ("field", "Activities"), ("field", "Issues_Delays"), ("field", "AI_Risk_Flag"),
-            ("field", "Linked_RITs"), ("const", "AI Migrated"), ("pdf",), ("folder",), ("cp",), ("sync",),
+            ("field", "Linked_RITs"), ("const", DB_STATUS_VALUE), ("pdf",), ("folder",), ("cp",), ("sync",),
         ),
         db_pdf_col=17,
         db_folder_col=18,
@@ -125,7 +133,7 @@ SPECS = {
             ("const", ""), ("field", "DRQ_No"), ("field", "Date"), ("field", "Discipline"),
             ("field", "Location"), ("field", "WBS"), ("field", "Time"), ("field", "Shift"),
             ("field", "Activities"), ("field", "Unit_Quantity"), ("field", "Linked_RITs"),
-            ("field", "Approved_by"), ("field", "Comments"), ("const", "AI Migrated"),
+            ("field", "Approved_by"), ("field", "Comments"), ("const", DB_STATUS_VALUE),
             ("pdf",), ("folder",), ("const", ""), ("const", ""), ("cp",), ("sync",),
         ),
         db_pdf_col=14,

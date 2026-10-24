@@ -23,9 +23,9 @@ def test_build_db_row_matches_apps_script_layout():
     # [TH] JSON.stringify แบบไม่มีช่องว่าง
     # [EN] JSON.stringify style, no spaces
     assert row[10] == '[{"role":"CM","count":10}]'
-    assert row[13] == "" and row[16] == "AI Migrated" and row[17] == "PDF" and row[18] == "FOLDER"
+    assert row[13] == "" and row[16] == "AI Synced" and row[17] == "PDF" and row[18] == "FOLDER"
     drq = build_db_row(SPECS["drq"], {"DRQ_No": "D1", "Comments": "=SUM(1)"}, "P", "F")
-    assert len(drq) == 20 and drq[1] == "D1" and drq[12] == "'=SUM(1)" and drq[13] == "AI Migrated" and drq[14] == "P" and drq[17] == ""
+    assert len(drq) == 20 and drq[1] == "D1" and drq[12] == "'=SUM(1)" and drq[13] == "AI Synced" and drq[14] == "P" and drq[17] == ""
     assert drq[18] == "" and drq[19] == "Synced"                  # S = C/P (empty unless a value is given); T = the "Legacy sync" tag
 
 

@@ -42,6 +42,7 @@ _KEEP = re.compile(
     r"|✓ Wrote the header '[A-Za-z /()]+' to DB_[A-Z]+![A-Z]+1"
     r"|✓ Updated C/P in DB_[A-Z]+![A-Z]+: |✓ Updated Folder Link in DB_[A-Z]+![A-Z]+: "
     r"|✓ Legacy sync tag in DB_[A-Z]+![A-Z]+: Synced on \d+ rows, Outdated on \d+ rows, cleared on \d+ rows"
+    r"|✓ Renamed Status in DB_[A-Z]+![A-Z]+: \d+ rows"
     r"|✓ Removed \d+ rows from DB_[A-Z]+ \(copied to |✓ DB_[A-Z]+ already matches the queue"
     r"|✗ Not syncing [A-Z_]+: \d+ rows would be removed|✗ Not syncing DB_[A-Z]+: the queue has no rows)"
     r"|  Part [12]/2 - (?:update the DB rows \(no AI\): C/P, Folder Link, tags, removals|AI: read the PDFs of the Waiting rows)"

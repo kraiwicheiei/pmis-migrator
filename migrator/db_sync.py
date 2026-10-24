@@ -17,21 +17,25 @@ from .config import SHEETS_BASE
 from .db_columns import apply_column_updates, ensure_cp_header, ensure_sync_header
 from .models import Clients
 from .sheets import SheetsError, append_rows, list_tabs, read_values, sheets_call, values_url
-from .specs import DB_CP_HEADER, DB_OUTDATED_VALUE, DB_SYNC_HEADER, DB_SYNC_VALUE, QueueSpec, SPECS
+from .specs import (DB_CP_HEADER, DB_OUTDATED_VALUE, DB_STATUS_LEGACY_VALUE, DB_STATUS_VALUE, DB_SYNC_HEADER, DB_SYNC_VALUE, QueueSpec, SPECS)
 from .stamps import time_stamp
 from .utils import col_letter, count_lines, extract_file_id, removal_limit
 
 # 이 도구가 쓴 행의 Status 값. 이 값이 아닌 행(사람이 넣은 행 등)은 절대 삭제하지 않음
 # [TH] ค่า Status ของแถวที่เครื่องมือนี้เขียน แถวที่ Status เป็นค่าอื่น (เช่นแถวที่คนใส่เอง) จะไม่ถูกลบเด็ดขาด
 # [EN] The Status value of the rows this tool wrote. A row with any other Status (e.g. one a person added) is never removed
-MIGRATED_STATUS = "AI Migrated"
+MIGRATED_STATUS = DB_STATUS_VALUE
+# 예전 이름("AI Migrated")의 행도 이 도구가 쓴 행으로 인정 (`sync db` 가 새 이름으로 바꿔 줌)
+# [TH] แถวที่ใช้ชื่อเก่า ("AI Migrated") ก็ถือว่าเป็นแถวที่เครื่องมือนี้เขียน (`sync db` จะเปลี่ยนเป็นชื่อใหม่ให้)
+# [EN] Rows with the old name ("AI Migrated") also count as written by this tool (`sync db` renames them to the new one)
+MIGRATED_STATUSES = (DB_STATUS_VALUE, DB_STATUS_LEGACY_VALUE)
 DB_CELLS_PER_WRITE = 500
 DELETES_PER_REQUEST = 200
 ARCHIVE_ROWS_PER_WRITE = 2000
 
 
 def db_status_col(spec: QueueSpec) -> int:
-    """DB 에서 Status(AI Migrated) 열의 인덱스 / [TH] index ของคอลัมน์ Status (AI Migrated) ใน DB / [EN] The index of the Status (AI Migrated) column of the DB"""
+    """DB 에서 Status(AI Synced) 열의 인덱스 / [TH] index ของคอลัมน์ Status (AI Synced) ใน DB / [EN] The index of the Status (AI Synced) column of the DB"""
     for i, col in enumerate(spec.columns):
         if col == ("const", MIGRATED_STATUS):
             return i
@@ -96,6 +100,10 @@ class DbSyncPlan:
     # [TH] เลขแถว DB -> ค่าใหม่ของ "Legacy sync" ("Synced" / "Outdated" / "" คือล้างป้าย) เฉพาะแถวที่ต่างจากค่าปัจจุบัน
     # [EN] DB row number -> the new "Legacy sync" value ("Synced" / "Outdated" / "" to clear); only the rows whose value differs from the current one
     tag_updates: dict[int, str] = field(default_factory=dict)
+    # DB 행 번호 -> 새 Status 값. 예전 이름("AI Migrated")의 행을 새 이름("AI Synced")으로 바꿈
+    # [TH] เลขแถว DB -> ค่า Status ใหม่ เปลี่ยนแถวที่ใช้ชื่อเก่า ("AI Migrated") เป็นชื่อใหม่ ("AI Synced")
+    # [EN] DB row number -> the new Status value. Renames the rows that still carry the old name ("AI Migrated") to the new one ("AI Synced")
+    status_updates: dict[int, str] = field(default_factory=dict)
     removals: dict[int, str] = field(default_factory=dict)           # DB 행 번호 -> 삭제 이유 / [TH] เลขแถว DB -> เหตุผลที่ลบ / [EN] DB row number -> why it is removed
     synced: int = 0            # 이번 실행 뒤 "Synced" 인 행 (이미 붙어 있는 행 포함) / [TH] แถวที่เป็น "Synced" หลังรอบนี้ (รวมแถวที่ติดอยู่แล้ว) / [EN] rows that are "Synced" after this run (including the ones that already are)
     outdated: int = 0          # 이번 실행 뒤 "Outdated" 인 행 / [TH] แถวที่เป็น "Outdated" หลังรอบนี้ / [EN] rows that are "Outdated" after this run
@@ -129,7 +137,7 @@ def plan_db_sync(queue_rows: list[list], db_values: list[list], spec: QueueSpec)
         "Synced" 는 PDF, C/P, Folder Link 가 큐와 맞는 것을 확인한 행에만 붙임. 큐에서 같은 PDF 의 C/P 나 Folder URL 이 여러 값이면(같은 파일을 여러 항목이 씀) DB 값이 그중 하나면 맞는 것이고,
         어느 것도 아니면 정할 수 없으므로 "Outdated" (값을 추측해 쓰지 않음)
       * 큐 H열(바뀌기 전 PDF)에 있는 PDF 는 AI 가 교체하기를 기다리므로 남기고 "Outdated"
-      * 그 밖에 PDF 가 큐에 없으면 삭제 대상. 단 Status 가 "AI Migrated" 이고 "Legacy sync" 가 "Synced" 또는 "Outdated" 인 행만 (= 옛 시트에서 온 행인데 옛 시트에서 사라진 행).
+      * 그 밖에 PDF 가 큐에 없으면 삭제 대상. 단 Status 가 "AI Synced"(또는 예전 이름 "AI Migrated") 이고 "Legacy sync" 가 "Synced" 또는 "Outdated" 인 행만 (= 옛 시트에서 온 행인데 옛 시트에서 사라진 행).
         옛 시트에서 온 적이 없는 행(표시 없음, 예: 옛 시트와 무관하게 다른 시스템이 넣은 문서)과 사람이 넣은 행은 남김
       * 표시가 없어야 하는 행: 큐에 없는 행(고아), 지우지 않는 행, PDF 링크가 없는 행 (지금과 다른 행만 계획에 넣음. 지워질 행은 표시를 건드리지 않음)
       * PDF 링크가 없는 행은 그 밖에는 건드리지 않음
@@ -138,7 +146,7 @@ def plan_db_sync(queue_rows: list[list], db_values: list[list], spec: QueueSpec)
            "Synced" ติดให้เฉพาะแถวที่ตรวจแล้วว่า PDF, C/P, Folder Link ตรงกับคิว ถ้า PDF เดียวกันมี C/P หรือ Folder URL หลายค่าในคิว (ไฟล์เดียวกันถูกใช้ในหลายรายการ)
            ค่าใน DB เป็นหนึ่งในนั้นก็ถือว่าตรง ถ้าไม่ตรงกับค่าไหนเลยจะตัดสินไม่ได้ จึงเป็น "Outdated" (ไม่เดาแล้วเขียนทับ)
          * PDF ที่อยู่ในคอลัมน์ H ของคิว (PDF ก่อนเปลี่ยน) รอ AI แทนที่ จึงเก็บไว้และเป็น "Outdated"
-         * นอกจากนั้นถ้า PDF ไม่อยู่ในคิวจะเป็นแถวที่จะลบ แต่เฉพาะแถวที่ Status เป็น "AI Migrated" และ "Legacy sync" เป็น "Synced" หรือ "Outdated" (= เป็นแถวจากชีตเก่าที่หายไปจากชีตเก่า)
+         * นอกจากนั้นถ้า PDF ไม่อยู่ในคิวจะเป็นแถวที่จะลบ แต่เฉพาะแถวที่ Status เป็น "AI Synced" (หรือชื่อเก่า "AI Migrated") และ "Legacy sync" เป็น "Synced" หรือ "Outdated" (= เป็นแถวจากชีตเก่าที่หายไปจากชีตเก่า)
            แถวที่ไม่เคยมาจากชีตเก่า (ไม่มีป้าย เช่นเอกสารที่ระบบอื่นเพิ่มโดยไม่เกี่ยวกับชีตเก่า) และแถวที่คนใส่เองจะถูกเก็บไว้
          * แถวที่ต้องไม่มีป้าย: แถวที่ไม่อยู่ในคิว (แถวกำพร้า), แถวที่ไม่ลบ และแถวที่ไม่มีลิงก์ PDF (ใส่ในแผนเฉพาะแถวที่ต่างจากตอนนี้ แถวที่จะถูกลบไม่แตะป้าย)
          * แถวที่ไม่มีลิงก์ PDF นอกนั้นไม่แตะ
@@ -148,7 +156,7 @@ def plan_db_sync(queue_rows: list[list], db_values: list[list], spec: QueueSpec)
            when the queue has several C/P or Folder URL values for the same PDF (several items use the same file) the DB value is fine if it is one of them,
            and when it is none of them it cannot be decided, so the row is "Outdated" (the value is not guessed and overwritten)
          * a PDF listed in column H of the queue (the PDF before a change) waits for the AI to replace it, so it is kept and "Outdated"
-         * any other PDF that is not in the queue is to be removed, but only a row whose Status is "AI Migrated" and whose "Legacy sync" is "Synced" or "Outdated"
+         * any other PDF that is not in the queue is to be removed, but only a row whose Status is "AI Synced" (or the old name "AI Migrated") and whose "Legacy sync" is "Synced" or "Outdated"
            (= it came from the legacy sheet and then left it). A row that never came from the legacy sheet (no tag, e.g. a document another system added that
            has nothing to do with the legacy sheet) and a row a person added are kept
          * the rows that must have no tag: a row that is not in the queue (an orphan), a row that is not removed and a row without a PDF link
@@ -184,6 +192,9 @@ def plan_db_sync(queue_rows: list[list], db_values: list[list], spec: QueueSpec)
         plan.rows += 1
         fid = extract_file_id(cells[spec.db_pdf_col])
         tag, now = "", cells[spec.db_sync_col]
+        if status_col >= 0 and cells[status_col] == DB_STATUS_LEGACY_VALUE:
+            plan.status_updates[number] = MIGRATED_STATUS                            # an old-name row: rename it (dropped again below when the row is about to be removed)
+            plan.touched[number] = fid or ""
         if not fid:
             plan.no_pdf += 1
         elif fid in in_queue:
@@ -206,13 +217,14 @@ def plan_db_sync(queue_rows: list[list], db_values: list[list], spec: QueueSpec)
         elif fid in waiting:
             plan.pending += 1
             tag = DB_OUTDATED_VALUE                                                   # the old version waits for the AI to replace it: it came from the legacy sheet but does not match it now
-        elif status_col < 0 or cells[status_col] != MIGRATED_STATUS:
+        elif status_col < 0 or cells[status_col] not in MIGRATED_STATUSES:
             plan.protected += 1
         elif now not in (DB_SYNC_VALUE, DB_OUTDATED_VALUE):
             plan.unsynced += 1                                                        # never came from the legacy sheet (e.g. added by another system): kept as it is
         else:
             plan.removals[number] = f"it came from the legacy sheet, but its PDF ({fid}) is not in {spec.queue_tab} any more"
             plan.touched[number] = fid
+            plan.status_updates.pop(number, None)
             continue                                                                  # about to be removed: its tag does not matter
         if tag == DB_SYNC_VALUE:
             plan.synced += 1
@@ -290,6 +302,7 @@ class DbSyncSummary:
     plan: DbSyncPlan = field(default_factory=DbSyncPlan)
     cp_updated: int = 0
     folder_updated: int = 0    # Folder Link 를 갱신한 행 / [TH] แถวที่อัปเดต Folder Link / [EN] rows whose Folder Link was updated
+    status_renamed: int = 0    # Status 를 "AI Migrated" 에서 "AI Synced" 로 바꾼 행 / [TH] แถวที่เปลี่ยน Status จาก "AI Migrated" เป็น "AI Synced" / [EN] rows whose Status was renamed from "AI Migrated" to "AI Synced"
     tagged: int = 0            # "Synced" 를 새로 붙인 행 / [TH] แถวที่ติด "Synced" ใหม่ / [EN] rows that got the "Synced" tag
     outdated: int = 0          # "Outdated" 를 새로 붙인 행 / [TH] แถวที่ติด "Outdated" ใหม่ / [EN] rows that got the "Outdated" tag
     untagged: int = 0          # 표시를 지운 행 / [TH] แถวที่ล้างป้าย / [EN] rows whose tag was cleared
@@ -310,6 +323,7 @@ def sync_db_for_queue(args: argparse.Namespace, clients: Clients, key: str, queu
     spec = SPECS[key]
     sess, sid = clients.sheets, args.spreadsheet_id
     last_col = col_letter(len(spec.columns))
+    status_col = db_status_col(spec)
     db_values = read_values(sess, sid, f"'{spec.db_tab}'!A1:{last_col}")
     plan = plan_db_sync(queue_rows, db_values, spec)
     summary = DbSyncSummary(plan=plan)
@@ -324,6 +338,8 @@ def sync_db_for_queue(args: argparse.Namespace, clients: Clients, key: str, queu
              ("Waiting for the AI (Outdated)", str(plan.pending), "(their PDF changed; the AI part replaces them)"),
              ("To remove", str(len(plan.removals)), "(came from the legacy sheet, PDF not in the queue any more)"),
              ("Kept as they are", str(plan.unsynced + plan.protected), "")]
+    if plan.status_updates:
+        table.insert(3, ("Status to rename", str(len(plan.status_updates)), f"({DB_STATUS_LEGACY_VALUE} -> {MIGRATED_STATUS})"))
     table += [(f"  {label}", str(n), "") for label, n in (("never synced with the legacy sheet", plan.unsynced), (f"Status is not '{MIGRATED_STATUS}'", plan.protected)) if n]
     if plan.ambiguous:
         table.append(("Outdated: C/P or Folder Link contradicts itself in the queue", str(plan.ambiguous), ""))
@@ -370,6 +386,10 @@ def sync_db_for_queue(args: argparse.Namespace, clients: Clients, key: str, queu
         apply_column_updates(sess, sid, spec, spec.db_sync_col, plan.tag_updates)
         summary.tagged, summary.outdated, summary.untagged = len(to_synced), len(to_outdated), len(to_clear)
         log(f"  ✓ Legacy sync tag in {spec.db_tab}!{col_letter(spec.db_sync_col + 1)}: {DB_SYNC_VALUE} on {summary.tagged} rows, {DB_OUTDATED_VALUE} on {summary.outdated} rows, cleared on {summary.untagged} rows")
+    if plan.status_updates:
+        apply_column_updates(sess, sid, spec, status_col, plan.status_updates)
+        summary.status_renamed = len(plan.status_updates)
+        log(f"  ✓ Renamed Status in {spec.db_tab}!{col_letter(status_col + 1)}: {summary.status_renamed} rows ('{DB_STATUS_LEGACY_VALUE}' -> '{MIGRATED_STATUS}')")
     if plan.removals:
         tabs = list_tabs(sess, sid)
         verify_unchanged(sess, sid, spec, {n: plan.touched[n] for n in plan.removals})
@@ -377,7 +397,7 @@ def sync_db_for_queue(args: argparse.Namespace, clients: Clients, key: str, queu
         delete_rows(sess, sid, tabs[spec.db_tab][0], list(plan.removals))
         summary.removed = len(plan.removals)
         log(f"  ✓ Removed {summary.removed} rows from {spec.db_tab} (copied to {archived} first)")
-    if not plan.cp_updates and not plan.folder_updates and not plan.tag_updates and not plan.removals:
+    if not plan.cp_updates and not plan.folder_updates and not plan.tag_updates and not plan.status_updates and not plan.removals:
         log(f"  ✓ {spec.db_tab} already matches the queue")
     return summary
 
