@@ -18,17 +18,17 @@ from .specs import SPECS
 # [EN] The target sheet ID has no default in the code and is read only from this environment variable (below is the variable name)
 SPREADSHEET_ID_ENV = "PMIS_SPREADSHEET_ID"
 
-# --extract 가 옛 탭을 읽어 올 스프레드시트 (선택. 비우면 대상 스프레드시트와 같은 파일)
-# [TH] สเปรดชีตที่ --extract ใช้อ่านแท็บเก่า (ไม่บังคับ ถ้าว่างจะใช้ไฟล์เดียวกับสเปรดชีตเป้าหมาย)
-# [EN] The spreadsheet --extract reads the legacy tabs from (optional; empty = the same file as the target spreadsheet)
+# `sync queue` 가 옛 탭을 읽어 올 스프레드시트 (선택. 비우면 대상 스프레드시트와 같은 파일)
+# [TH] สเปรดชีตที่ `sync queue` ใช้อ่านแท็บเก่า (ไม่บังคับ ถ้าว่างจะใช้ไฟล์เดียวกับสเปรดชีตเป้าหมาย)
+# [EN] The spreadsheet `sync queue` reads the legacy tabs from (optional; empty = the same file as the target spreadsheet)
 LEGACY_SPREADSHEET_ID_ENV = "PMIS_LEGACY_SPREADSHEET_ID"
 
 
 def require_legacy_sheet_names(keys: list[str], environ: Optional[dict] = None) -> dict[str, str]:
     """
-    --extract 에 필요한 옛 시트 탭 이름을 환경 변수에서만 읽음. 비어 있으면 안내 메시지와 함께 종료
-    [TH] อ่านชื่อแท็บชีตเก่าที่ --extract ต้องใช้จากตัวแปรสภาพแวดล้อมเท่านั้น ถ้าว่างจะจบพร้อมข้อความแนะนำ
-    [EN] Reads the legacy tab names that --extract needs from the environment only; exits with a how-to message if one is empty
+    `sync queue` 에 필요한 옛 시트 탭 이름을 환경 변수에서만 읽음. 비어 있으면 안내 메시지와 함께 종료
+    [TH] อ่านชื่อแท็บชีตเก่าที่ `sync queue` ต้องใช้จากตัวแปรสภาพแวดล้อมเท่านั้น ถ้าว่างจะจบพร้อมข้อความแนะนำ
+    [EN] Reads the legacy tab names that `sync queue` needs from the environment only; exits with a how-to message if one is empty
     """
     env = environ if environ is not None else os.environ
     names: dict[str, str] = {}
@@ -40,7 +40,7 @@ def require_legacy_sheet_names(keys: list[str], environ: Optional[dict] = None) 
         else:
             missing.append(key)
     if missing:
-        lines = ["The legacy sheet tab name is not set for --extract (there is no default in the code):"]
+        lines = ["The legacy sheet tab name is not set for `sync queue` (there is no default in the code):"]
         for key in missing:
             lines.append(f'  PowerShell:  $env:{SPECS[key].legacy_env} = "<tab name>"   # for the {SPECS[key].name} queue')
         lines.append("  The tab name must match the one shown in the spreadsheet exactly (brackets and spaces included)")

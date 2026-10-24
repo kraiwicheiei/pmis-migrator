@@ -34,16 +34,22 @@ SINGLE_REPORT_HINT = (
 # [TH] หัวตารางของคอลัมน์ C/P ในแท็บ DB (DB_DWR คอลัมน์ T, DB_DRQ คอลัมน์ S)
 # [EN] The header of the C/P column of the DB tabs (column T in DB_DWR, column S in DB_DRQ)
 DB_CP_HEADER = "Status (C/P)"
-# 옛 시트와 맞는 DB 행에 붙이는 표시 열의 머리글과 값 (C/P 열 바로 뒤: DB_DWR 은 U열, DB_DRQ 는 T열).
-# 행의 PDF 가 큐(= 옛 시트와 같은 내용)에 있으면 "Synced", 큐에 없는 행(고아), 바뀐 PDF 의 교체를 기다리는 행, 이 도구가 쓴 행이 아니라 지우지 않은 행은 비어 있음
-# [TH] หัวตารางและค่าของคอลัมน์ป้ายที่ติดให้แถวใน DB ที่ตรงกับชีตเก่า (ต่อจากคอลัมน์ C/P ทันที: DB_DWR คอลัมน์ U, DB_DRQ คอลัมน์ T)
-#      ถ้า PDF ของแถวอยู่ในคิว (= เนื้อหาเดียวกับชีตเก่า) จะเป็น "Synced" ส่วนแถวที่ไม่อยู่ในคิว (แถวกำพร้า), แถวที่รอแทนที่ด้วย PDF ใหม่,
-#      และแถวที่ไม่ใช่แถวที่เครื่องมือนี้เขียนจึงไม่ลบ จะว่าง
-# [EN] The header and value of the tag column put on the DB rows that match the legacy sheet (right after the C/P column: column U in DB_DWR, column T in DB_DRQ).
-#      "Synced" when the PDF of the row is in the queue (= the same content as the legacy sheet); empty for a row that is not in the queue (an orphan),
-#      a row that waits to be replaced by a new PDF, and a row this tool did not write (so it is not removed)
+# DB 행이 옛 시트와 맞는지 알려 주는 표시 열의 머리글과 값 (C/P 열 바로 뒤: DB_DWR 은 U열, DB_DRQ 는 T열).
+# "Synced" = 옛 시트에서 온 행이고 PDF, C/P, Folder Link 가 큐(= 옛 시트와 같은 내용)와 확인되어 맞음.
+# "Outdated" = 옛 시트에서 온 행이지만 맞지 않음 (PDF 가 바뀌어 AI 가 새 파일로 교체하기를 기다리는 행, 또는 C/P / Folder Link 를 큐 안에서 정할 수 없는 행).
+# 비어 있음 = 옛 시트에서 온 적이 없는 행 (다른 시스템이 넣은 문서 등), 이 도구가 쓴 행이 아닌 행, PDF 링크가 없는 행
+# [TH] หัวตารางและค่าของคอลัมน์ป้ายที่บอกว่าแถวใน DB ตรงกับชีตเก่าหรือไม่ (ต่อจากคอลัมน์ C/P ทันที: DB_DWR คอลัมน์ U, DB_DRQ คอลัมน์ T)
+#      "Synced" = แถวที่มาจากชีตเก่าและตรวจแล้วว่า PDF, C/P, Folder Link ตรงกับคิว (= เนื้อหาเดียวกับชีตเก่า)
+#      "Outdated" = แถวที่มาจากชีตเก่าแต่ยังไม่ตรง (PDF เปลี่ยนและรอ AI อ่านไฟล์ใหม่มาแทนที่ หรือ C/P / Folder Link ในคิวขัดกันจนตัดสินไม่ได้)
+#      ว่าง = แถวที่ไม่เคยมาจากชีตเก่า (เช่นเอกสารที่ระบบอื่นเพิ่ม), แถวที่ไม่ใช่แถวที่เครื่องมือนี้เขียน, แถวที่ไม่มีลิงก์ PDF
+# [EN] The header and values of the tag column that says whether a DB row matches the legacy sheet (right after the C/P column: column U in DB_DWR, column T in DB_DRQ).
+#      "Synced" = the row came from the legacy sheet and its PDF, C/P and Folder Link were checked against the queue (= the same content as the legacy sheet).
+#      "Outdated" = the row came from the legacy sheet but does not match (its PDF changed and it waits for the AI to replace it with the new file,
+#      or its C/P / Folder Link cannot be decided because the queue contradicts itself).
+#      Empty = a row that never came from the legacy sheet (e.g. a document another system added), a row this tool did not write, a row without a PDF link
 DB_SYNC_HEADER = "Legacy sync"
 DB_SYNC_VALUE = "Synced"
+DB_OUTDATED_VALUE = "Outdated"
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,10 @@ class QueueSpec:
     # [TH] index (เริ่ม 0) ของคอลัมน์ PDF Link ใน DB ใช้เช็คข้อมูลซ้ำ
     # [EN] 0-based index of the PDF Link column in the DB; used for the duplicate check
     db_pdf_col: int
+    # DB 에서 Folder Link 열의 인덱스(0부터): DB_DWR 은 S열(index 18), DB_DRQ 는 P열(index 15). 큐의 Folder URL(E열)과 맞춤
+    # [TH] index (เริ่ม 0) ของคอลัมน์ Folder Link ใน DB: DB_DWR คือคอลัมน์ S (index 18), DB_DRQ คือคอลัมน์ P (index 15) ใช้เทียบกับ Folder URL (คอลัมน์ E) ของคิว
+    # [EN] 0-based index of the Folder Link column in the DB: column S (index 18) in DB_DWR, column P (index 15) in DB_DRQ; matched with the queue's Folder URL (column E)
+    db_folder_col: int
     # DB 에서 C/P 열의 인덱스(0부터). 기존 열 바로 뒤: DB_DWR 은 T열(index 19), DB_DRQ 는 S열(index 18)
     # [TH] index (เริ่ม 0) ของคอลัมน์ C/P ใน DB ต่อจากคอลัมน์เดิมทันที: DB_DWR คือคอลัมน์ T (index 19), DB_DRQ คือคอลัมน์ S (index 18)
     # [EN] 0-based index of the C/P column in the DB, right after the existing columns: column T (index 19) in DB_DWR, column S (index 18) in DB_DRQ
@@ -74,9 +84,9 @@ class QueueSpec:
     # [TH] คีย์ใน JSON ของ AI ที่เก็บเลขเอกสาร (ใช้จับคู่กับ Doc No ของคิวเมื่อ AI ตอบกลับมาหลายรายงาน)
     # [EN] Key in the AI JSON that holds the document number (used to match the queue's Doc No when the AI returns several reports)
     no_key: str = ""
-    # --extract 전용: 옛 시트 탭 이름을 담은 환경 변수 이름 / 스캔할 마지막 열(0부터, 이 값은 포함하지 않음)
-    # [TH] เฉพาะ --extract: ชื่อตัวแปรสภาพแวดล้อมที่เก็บชื่อแท็บชีตเก่า / คอลัมน์สุดท้ายที่สแกน (เริ่ม 0 ไม่รวมค่านี้)
-    # [EN] --extract only: name of the environment variable holding the legacy tab name / end column to scan (0-based, exclusive)
+    # `sync queue` 전용: 옛 시트 탭 이름을 담은 환경 변수 이름 / 스캔할 마지막 열(0부터, 이 값은 포함하지 않음)
+    # [TH] เฉพาะ `sync queue`: ชื่อตัวแปรสภาพแวดล้อมที่เก็บชื่อแท็บชีตเก่า / คอลัมน์สุดท้ายที่สแกน (เริ่ม 0 ไม่รวมค่านี้)
+    # [EN] `sync queue` only: name of the environment variable holding the legacy tab name / end column to scan (0-based, exclusive)
     legacy_env: str = ""
     legacy_end_col: int = 0
 
@@ -96,6 +106,7 @@ SPECS = {
             ("field", "Linked_RITs"), ("const", "AI Migrated"), ("pdf",), ("folder",), ("cp",), ("sync",),
         ),
         db_pdf_col=17,
+        db_folder_col=18,
         db_cp_col=19,
         db_sync_col=20,
         no_key="DWR_No",
@@ -118,6 +129,7 @@ SPECS = {
             ("pdf",), ("folder",), ("const", ""), ("const", ""), ("cp",), ("sync",),
         ),
         db_pdf_col=14,
+        db_folder_col=15,
         db_cp_col=18,
         db_sync_col=19,
         no_key="DRQ_No",

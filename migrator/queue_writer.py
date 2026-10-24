@@ -1,7 +1,7 @@
 """
-큐 시트 쓰기 (--extract 의 쓰기 쪽): 새로 만들기, 새로 계산해 기존 행과 맞추기(sync)
-[TH] เขียนชีตคิว (ฝั่งเขียนของ --extract): สร้างใหม่, คำนวณใหม่แล้วจับคู่กับแถวเดิม (sync)
-[EN] Writing the queue sheet (the writing half of --extract): rebuild, recompute and match with the existing rows (sync)
+큐 시트 쓰기 (`sync queue` 의 쓰기 쪽): 새로 만들기, 새로 계산해 기존 행과 맞추기(sync)
+[TH] เขียนชีตคิว (ฝั่งเขียนของ `sync queue`): สร้างใหม่, คำนวณใหม่แล้วจับคู่กับแถวเดิม (sync)
+[EN] Writing the queue sheet (the writing half of `sync queue`): rebuild, recompute and match with the existing rows (sync)
 """
 from __future__ import annotations
 

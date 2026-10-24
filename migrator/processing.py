@@ -59,9 +59,9 @@ def process_job(job: Job, spec: QueueSpec, clients: Clients, tls: threading.loca
         # [EN] Same as Apps Script: the cover image is used only for a PDF larger than the limit (exactly at the limit = full file)
         is_pdf = meta.get("mimeType", "") == "application/pdf"
         use_cover = size > max_bytes and is_pdf and allow_thumbnail
-        # --check-access 모드: 메타데이터만 확인하고 여기서 종료 (다운로드/Gemini 호출 없음)
-        # [TH] โหมด --check-access: เช็กแค่ metadata แล้วจบตรงนี้ (ไม่ดาวน์โหลด/ไม่เรียก Gemini)
-        # [EN] --check-access mode: only check the metadata and stop here (no download, no Gemini call)
+        # check access 모드: 메타데이터만 확인하고 여기서 종료 (다운로드/Gemini 호출 없음)
+        # [TH] โหมด check access: เช็กแค่ metadata แล้วจบตรงนี้ (ไม่ดาวน์โหลด/ไม่เรียก Gemini)
+        # [EN] check access mode: only check the metadata and stop here (no download, no Gemini call)
         if check_only:
             return RowResult(job, "ok", data={"_name": meta.get("name"), "_size": size, "_cover": use_cover})
         if size > max_bytes and not use_cover:

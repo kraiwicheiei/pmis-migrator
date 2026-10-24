@@ -1,7 +1,7 @@
 """
-옛 시트 셀 변환과 큐 항목 만들기 테스트 (--extract 의 읽기)
-[TH] เทสต์การแปลงเซลล์ชีตเก่าและการสร้างรายการคิว (ฝั่งอ่านของ --extract)
-[EN] Tests for the legacy cell conversion and the queue items (the reading half of --extract)
+옛 시트 셀 변환과 큐 항목 만들기 테스트 (`sync queue` 의 읽기)
+[TH] เทสต์การแปลงเซลล์ชีตเก่าและการสร้างรายการคิว (ฝั่งอ่านของ `sync queue`)
+[EN] Tests for the legacy cell conversion and the queue items (the reading half of `sync queue`)
 """
 
 from migrator.legacy_sheet import sheet_cell_link, sheet_cell_text

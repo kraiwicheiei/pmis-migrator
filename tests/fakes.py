@@ -9,7 +9,7 @@ import re
 import threading
 import urllib.parse
 
-from migrator import cli, runner
+from migrator import cli, pipeline, runner
 from migrator.cli import main
 from migrator.config import DRIVE_THUMBNAIL_URL
 from migrator.models import Clients
@@ -254,6 +254,7 @@ def main_with(monkeypatch, argv, recorder, sid="SID"):
         monkeypatch.setenv("PMIS_SPREADSHEET_ID", sid)
     monkeypatch.setattr(cli, "make_clients", lambda args, need_gemini: Clients(sheets=None, drive_factory=None, gemini=None, api_key="K", sa_email="sa@x"))
     monkeypatch.setattr(runner, "run", recorder)
+    monkeypatch.setattr(pipeline, "run_db_sync", lambda *a, **k: 0)         # part 1 of `sync db` (no AI) is not what these tests are about
     return main(argv)
 
 

@@ -1,7 +1,7 @@
 """
-옛 시트(셀 단위)를 읽어 큐 항목으로 바꾸기 (--extract 의 읽기 쪽)
-[TH] อ่านชีตเก่า (ระดับเซลล์) แล้วแปลงเป็นรายการคิว (ฝั่งอ่านของ --extract)
-[EN] Reading the legacy sheet (cell level) and turning it into queue items (the reading half of --extract)
+옛 시트(셀 단위)를 읽어 큐 항목으로 바꾸기 (`sync queue` 의 읽기 쪽)
+[TH] อ่านชีตเก่า (ระดับเซลล์) แล้วแปลงเป็นรายการคิว (ฝั่งอ่านของ `sync queue`)
+[EN] Reading the legacy sheet (cell level) and turning it into queue items (the reading half of `sync queue`)
 """
 from __future__ import annotations
 

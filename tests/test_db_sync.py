@@ -1,8 +1,8 @@
 """
-DB 를 큐에 맞추기 테스트: 옛 시트와 맞춘 적이 있는데 큐에서 사라진 PDF 의 행 삭제(보관 후), 맞춘 적 없는 행은 보존, C/P 갱신, 교체 대기 행 보호, 안전장치, 바뀐 PDF 의 행 교체 범위
-[TH] เทสต์การทำให้ DB ตรงกับคิว: ลบแถวที่เคย sync กับชีตเก่าแล้ว PDF หายไปจากคิว (เก็บสำรองก่อน), เก็บแถวที่ไม่เคย sync ไว้, อัปเดต C/P, ปกป้องแถวที่รอแทนที่, ตัวกันพลาด, ช่วงที่ใช้แทนที่แถวของ PDF ที่เปลี่ยน
-[EN] Tests for making the DB match the queue: removing the rows that were synced and whose PDF left the queue (archived first), keeping the rows that never were synced, updating C/P, protecting the rows that wait to be
-     replaced, the safety net, and the ranges that replace the row of a changed PDF
+DB 를 큐에 맞추기 테스트 (AI 없는 부분): 옛 시트에서 온 행이 큐에서 사라지면 삭제(보관 후), 온 적 없는 행은 보존, C/P 와 Folder Link 갱신, "Legacy sync" 표시 Synced / Outdated, 안전장치, 바뀐 PDF 의 행 교체 범위
+[TH] เทสต์การทำให้ DB ตรงกับคิว (ส่วนที่ไม่ใช้ AI): ลบแถวที่มาจากชีตเก่าแล้ว PDF หายไปจากคิว (เก็บสำรองก่อน), เก็บแถวที่ไม่เคยมาจากชีตเก่า, อัปเดต C/P และ Folder Link, ป้าย "Legacy sync" Synced / Outdated, ตัวกันพลาด, ช่วงที่ใช้แทนที่แถวของ PDF ที่เปลี่ยน
+[EN] Tests for making the DB match the queue (the part without the AI): removing the rows that came from the legacy sheet and whose PDF left the queue (archived first), keeping the rows that never did,
+     updating C/P and Folder Link, the "Legacy sync" tag Synced / Outdated, the safety net, and the ranges that replace the row of a changed PDF
 """
 import pytest
 
@@ -41,6 +41,7 @@ def test_plan_keeps_a_pdf_that_waits_to_be_replaced_and_every_row_of_a_shared_pd
     db = [db_row(9), db_row(2), db_row(2)]                                           # FID(9) is the old PDF of row 1; FID(2) has two DB rows
     plan = plan_db_sync(queue, [["h"] * 20] + db, DWR)
     assert plan.removals == {} and plan.pending == 1 and plan.cp_updates == {3: "C", 4: "C"}
+    assert plan.tag_updates == {2: "Outdated", 3: "Synced", 4: "Synced"} and (plan.synced, plan.outdated) == (2, 1)         # the old version waits for the AI: Outdated; the shared PDF: both rows Synced
 
 
 def test_plan_never_guesses_a_conflicting_cp_never_clears_a_value_and_leaves_rows_without_a_pdf_alone():
@@ -48,6 +49,7 @@ def test_plan_never_guesses_a_conflicting_cp_never_clears_a_value_and_leaves_row
     db = [db_row(1), db_row(2, "P"), db_row(5, pdf="")]
     plan = plan_db_sync(queue, [["h"] * 20] + db, DWR)
     assert plan.ambiguous == 1 and plan.cp_updates == {} and plan.no_pdf == 1 and plan.removals == {}      # an empty C/P in the queue does not clear the DB's "P"
+    assert plan.tag_updates == {2: "Outdated", 3: "Synced"}                                                # C and P for the same PDF cannot be decided: Outdated, not Synced
 
 
 def test_plan_uses_the_columns_of_each_db():
@@ -55,6 +57,7 @@ def test_plan_uses_the_columns_of_each_db():
     row[DRQ.db_pdf_col], row[db_status_col(DRQ)] = URL(1), MIGRATED_STATUS
     plan = plan_db_sync([qrow8(1, "P")], [["h"] * 19, row], DRQ)
     assert plan.cp_updates == {2: "P"} and db_status_col(DRQ) == 13 and db_status_col(DWR) == 16
+    assert plan.folder_updates == {2: FOLDER}                                                              # DB_DRQ's Folder Link is column P (index 15), empty here
 
 
 # --- 적용 / applying / การนำไปใช้ ---
@@ -93,8 +96,9 @@ def test_sync_dry_run_reports_and_writes_nothing():
     assert w.tabs["DB_DWR"] == before and archive_tab_name(DWR) not in w.tabs and all(c[0] == "GET" for c in w.calls)
     assert (summary.cp_updated, summary.removed) == (0, 0) and summary.plan.removals.keys() == {3}
     assert any("(--dry-run) nothing was written to DB_DWR: a real run would do the counts above" in m for m in logs)
-    assert count_rows(logs) == {"In sync with the queue": "1", '"Legacy sync" tag': "set 1, clear 0", "C/P to update": "1",
-                                "To remove": "1  (were synced, PDF not in the queue any more)", "Kept as they are": "0"}
+    assert count_rows(logs) == {"In sync with the queue": "1", "C/P to update": "1", "Folder Link to update": "0", '"Legacy sync" tag': "set Synced 1, set Outdated 0, clear 0",
+                                "Waiting for the AI (Outdated)": "0  (their PDF changed; the AI part replaces them)",
+                                "To remove": "1  (came from the legacy sheet, PDF not in the queue any more)", "Kept as they are": "0"}
     assert any("sample (remove): DB row 3: DWR-3" in m for m in logs)
 
 
@@ -115,16 +119,16 @@ def test_plan_tags_the_rows_that_are_in_the_queue_and_never_the_orphans():
     queue = [qrow8(1, "C"), qrow8(2, "C", "Waiting", replaces=FID(5))]
     db = [db_row(1), db_row(5), db_row(7, tag="Synced"), db_row(8, status="Typed by a person"), db_row(9, pdf=""), db_row(10)]
     plan = plan_db_sync(queue, [["h"] * 21] + db, DWR)
-    assert plan.tag_updates == {2: "Synced"}                                                 # only DB row 2 (PDF 1, in the queue); the orphan (7) is about to go, the others must stay empty
-    assert plan.removals.keys() == {4} and plan.pending == 1 and plan.protected == 1 and plan.no_pdf == 1 and plan.synced == 1 and plan.unsynced == 1
+    assert plan.tag_updates == {2: "Synced", 3: "Outdated"}                                  # DB row 2 (PDF 1, in the queue) and the old version that waits for the AI; the orphan (7) is about to go, the others must stay empty
+    assert plan.removals.keys() == {4} and plan.pending == 1 and plan.protected == 1 and plan.no_pdf == 1 and plan.synced == 1 and plan.unsynced == 1 and plan.outdated == 1
 
 
 def test_plan_clears_a_tag_that_is_no_longer_true_and_leaves_a_correct_tag_alone():
     queue = [qrow8(1, "C"), qrow8(2, "C", "Waiting", replaces=FID(5))]
     db = [db_row(1, tag="Synced"), db_row(5, tag="Synced"), db_row(8, status="Typed by a person", tag="Synced"), db_row(9, pdf="", tag="Synced")]
     plan = plan_db_sync(queue, [["h"] * 21] + db, DWR)
-    assert plan.tag_updates == {4: "", 5: ""}                                                # the protected row and the row without a PDF lose the tag
-    assert 2 not in plan.tag_updates and 3 not in plan.tag_updates                           # a correct tag is not written again; the row that waits for its replacement keeps what it has
+    assert plan.tag_updates == {3: "Outdated", 4: "", 5: ""}                                 # the old version that waits for the AI is Outdated; the protected row and the row without a PDF lose the tag
+    assert 2 not in plan.tag_updates                                                         # a correct tag is not written again
 
 
 def test_plan_tags_the_drq_rows_in_column_t():
@@ -141,20 +145,21 @@ def test_sync_tags_the_matching_rows_and_leaves_the_orphans_untagged():
     assert tags(w) == ["Synced", "Synced", ""]                                               # DWR-8 (an orphan) was removed; the person's row stays untagged
     assert [r[1] for r in w.tabs["DB_DWR"][1:]] == ["DWR-1", "DWR-2", "DWR-7"]
     assert w.tabs["DB_DWR"][0][20] == "Legacy sync" and (summary.tagged, summary.untagged, summary.removed) == (2, 0, 1)
-    assert any("Wrote the header 'Legacy sync' to DB_DWR!U1" in m for m in logs) and any("Legacy sync tag in DB_DWR!U: set on 2 rows, cleared on 0 rows" in m for m in logs)
+    assert any("Wrote the header 'Legacy sync' to DB_DWR!U1" in m for m in logs) and any("Legacy sync tag in DB_DWR!U: Synced on 2 rows, Outdated on 0 rows, cleared on 0 rows" in m for m in logs)
 
 
-def test_a_row_that_waits_to_be_replaced_keeps_its_tag_so_it_is_still_known_to_come_from_the_legacy_sheet():
+def test_a_row_that_waits_for_the_ai_is_outdated_and_is_synced_again_once_the_new_file_is_in():
     queue = [qrow8(1, "C", "Waiting", replaces=FID(5))]
     w = db_world(queue, [db_row(5, tag="Synced"), db_row(6)])
-    sync(w, queue)
-    assert tags(w) == ["Synced", ""]                                                         # the old version is kept as it is; the row that never came from the legacy sheet stays untagged
-    w.tabs["DB_DWR"][1][17] = URL(1)                                                         # migrate replaced it in place: the row now holds the new PDF
-    queue_done = [qrow8(1, "C", "Done")]
-    sync(w, queue_done)
+    summary, logs = sync(w, queue)
+    assert tags(w) == ["Outdated", ""]                                                       # the old version is kept but it no longer matches; the row that never came from the legacy sheet stays untagged
+    assert (summary.outdated, summary.tagged, summary.removed) == (1, 0, 0) and count_rows(logs)["Waiting for the AI (Outdated)"].startswith("1")
+    assert any("Legacy sync tag in DB_DWR!U: Synced on 0 rows, Outdated on 1 rows, cleared on 0 rows" in m for m in logs)
+    w.tabs["DB_DWR"][1][17], w.tabs["DB_DWR"][1][20] = URL(1), "Synced"                       # the AI part replaced it in place: the new PDF, written with the Synced tag
+    sync(w, [qrow8(1, "C", "Done")])
     assert tags(w) == ["Synced", ""] and [r[1] for r in w.tabs["DB_DWR"][1:]] == ["DWR-5", "DWR-6"]
-    # the item leaves the legacy sheet before migrate replaced the old version: the old version goes too
-    w2 = db_world([qrow8(2, "C")], [db_row(5, tag="Synced"), db_row(2)])
+    # the item leaves the legacy sheet before the AI replaced the old version: the old version goes too (Outdated still means "came from the legacy sheet")
+    w2 = db_world([qrow8(2, "C")], [db_row(5, tag="Outdated"), db_row(2)])
     summary, _ = sync(w2, [qrow8(2, "C")])
     assert summary.removed == 1 and [r[1] for r in w2.tabs["DB_DWR"][1:]] == ["DWR-2"]
 
@@ -205,6 +210,71 @@ def test_an_orphan_that_still_carries_a_tag_is_removed_and_archived_with_it():
     assert [r[1] for r in w.tabs["DB_DWR"][1:]] == ["DWR-1"] and tags(w) == ["Synced"] and summary.untagged == 0            # it is removed (archived), not just untagged
     archive = w.tabs[archive_tab_name(DWR)]
     assert archive[1][5] == "DWR-3" and len(archive[1]) == 4 + 21 and archive[1][4 + 20] == "Synced"                         # the archive keeps the whole row, tag included
+
+
+# --- Folder Link / the Folder Link / Folder Link ---
+OLD_FOLDER = "https://drive.google.com/drive/folders/OLDFOLDERIDxxxxxxxxxxxxxxxxxxxxxxx"
+
+
+def with_folder(row, folder, col=18):
+    row = list(row)
+    row[col] = folder
+    return row
+
+
+def queue_with_folder(n, folder, cp="C", **kw):
+    row = qrow8(n, cp, **kw)
+    row[4] = folder
+    return row
+
+
+def test_a_changed_folder_link_is_updated_like_the_cp():
+    queue = [queue_with_folder(1, FOLDER), queue_with_folder(2, FOLDER)]
+    w = db_world(queue, [with_folder(db_row(1), OLD_FOLDER), db_row(2)])
+    plan = plan_db_sync(queue, w.tabs["DB_DWR"], DWR)
+    assert plan.folder_updates == {2: FOLDER} and plan.cp_updates == {2: "C", 3: "C"}                       # only row 2 has another folder; both rows have no C/P yet
+    summary, logs = sync(w, queue)
+    assert [r[18] for r in w.tabs["DB_DWR"][1:]] == [FOLDER, FOLDER] and summary.folder_updated == 1
+    assert any("Updated Folder Link in DB_DWR!S: 1 rows" in m for m in logs) and count_rows(logs)["Folder Link to update"] == "1"
+    assert "USER_ENTERED" in w.inputs and tags(w) == ["Synced", "Synced"]                                    # written like the rows the AI part appends; both rows match the queue now
+    assert sync(w, queue)[0].folder_updated == 0                                                            # and a second run has nothing to do
+
+
+def test_the_same_folder_in_another_link_format_is_not_a_change_and_an_empty_one_never_clears():
+    same_id = FOLDER + "?usp=sharing"
+    queue = [queue_with_folder(1, same_id), queue_with_folder(2, "")]
+    db = [db_row(1), db_row(2)]
+    plan = plan_db_sync(queue, [["h"] * 21] + db, DWR)
+    assert plan.folder_updates == {} and plan.tag_updates == {2: "Synced", 3: "Synced"}                      # same folder ID: nothing to write; no folder in the queue: the DB value stays
+
+
+def test_a_folder_that_contradicts_itself_in_the_queue_is_not_guessed_and_the_row_is_outdated():
+    queue = [queue_with_folder(1, FOLDER), queue_with_folder(1, OLD_FOLDER)]                                # the same PDF, two folders
+    plan = plan_db_sync(queue, [["h"] * 21, with_folder(db_row(1, "C"), "https://drive.google.com/drive/folders/OTHERFOLDERIDxxxxxxxxxxxxxxxxxxxxx")], DWR)
+    assert plan.folder_updates == {} and plan.ambiguous == 1 and plan.tag_updates == {2: "Outdated"} and (plan.synced, plan.outdated) == (0, 1)
+
+
+def test_a_pdf_used_by_several_items_is_fine_when_the_db_has_one_of_their_values():
+    queue = [queue_with_folder(1, FOLDER, "C"), queue_with_folder(1, OLD_FOLDER, "P")]                      # the same file is used by two items: two folders, C and P
+    plan = plan_db_sync(queue, [["h"] * 21, db_row(1, "P")], DWR)                                           # the DB row has the folder of the first item and the C/P of the second
+    assert plan.tag_updates == {2: "Synced"} and plan.ambiguous == 0 and plan.cp_updates == {} and plan.folder_updates == {} and (plan.synced, plan.outdated) == (1, 0)
+    other = plan_db_sync(queue, [["h"] * 21, with_folder(db_row(1, "X"), "https://drive.google.com/drive/folders/THIRDFOLDERIDxxxxxxxxxxxxxxxxxxxxx")], DWR)
+    assert other.ambiguous == 1 and other.tag_updates == {2: "Outdated"} and other.cp_updates == {} and other.folder_updates == {}     # a value that is none of them cannot be decided: not guessed
+
+
+def test_the_folder_column_of_each_db_is_its_own():
+    row = [""] * 20
+    row[DRQ.db_pdf_col], row[db_status_col(DRQ)], row[DRQ.db_folder_col] = URL(1), MIGRATED_STATUS, OLD_FOLDER
+    row[18] = FOLDER                                                                                        # the C/P column of DB_DRQ: never read as the folder
+    plan = plan_db_sync([queue_with_folder(1, FOLDER, "P")], [["h"] * 20, row], DRQ)
+    assert DRQ.db_folder_col == 15 and DWR.db_folder_col == 18 and plan.folder_updates == {2: FOLDER} and plan.cp_updates == {2: "P"}
+
+
+def test_an_outdated_row_that_left_the_legacy_sheet_is_removed_and_one_that_was_never_tagged_is_kept():
+    queue = [qrow8(1, "C")]
+    w = db_world(queue, [db_row(1, "C", tag="Synced"), db_row(3, tag="Outdated"), db_row(4)])
+    summary, _ = sync(w, queue)
+    assert [r[1] for r in w.tabs["DB_DWR"][1:]] == ["DWR-1", "DWR-4"] and summary.removed == 1 and summary.plan.unsynced == 1
 
 
 # --- 안전장치 / the safety net / ตัวกันพลาด ---
@@ -303,6 +373,21 @@ def test_run_db_sync_reads_the_queue_sheet_and_returns_the_exit_code(monkeypatch
     broken = db_world([qrow8(1)], [db_row(1)])
     broken.fail_on = "values/"
     assert run_db_sync(ns(queue=None), broken.clients(), ["dwr"], log=lambda m: None) == 2
+
+
+def test_run_db_sync_uses_the_planned_rows_of_a_queue_instead_of_reading_its_sheet():
+    w = db_world([qrow8(1, "C")], [db_row(1), db_row(2, tag="Synced")])                     # the stored queue has only PDF 1, so PDF 2 would be removed
+    logs = []
+    assert run_db_sync(ns(dry_run=True), w.clients(), ["dwr"], log=logs.append) == 0
+    assert count_rows(logs)["To remove"].startswith("1")
+    reads = len(w.calls)
+    logs = []
+    assert run_db_sync(ns(dry_run=True), w.clients(), ["dwr"], log=logs.append, planned={"dwr": [qrow8(1, "C"), qrow8(2, "P")]}) == 0     # the plan keeps PDF 2 as well
+    assert count_rows(logs)["To remove"].startswith("0") and count_rows(logs)["C/P to update"] == "2"
+    assert not any("MIGRATION_QUEUE" in str(c[1]) for c in w.calls[reads:])                  # the queue sheet was not read this time
+    other = db_world([qrow8(1, "C")], [db_row(1)])
+    run_db_sync(ns(dry_run=True), other.clients(), ["dwr"], log=lambda m: None, planned={})   # an empty plan dict changes nothing: the sheet is read
+    assert any("MIGRATION_QUEUE" in str(c[1]) for c in other.calls)
 
 
 # --- 제자리 교체 범위 / the replace-in-place ranges / ช่วงสำหรับแทนที่ในที่เดิม ---

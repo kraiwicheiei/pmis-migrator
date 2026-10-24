@@ -1,7 +1,7 @@
 """
-큐에서 처리할 행을 고르고 메인 루프를 돌림 (--dry-run / --check-access / 실제 실행)
-[TH] เลือกแถวที่ต้องทำจากคิวและรันวงรอบหลัก (--dry-run / --check-access / รันจริง)
-[EN] Selects the rows to process from a queue and runs the main loop (--dry-run / --check-access / a real run)
+큐에서 처리할 행을 고르고 메인 루프를 돌림 (--dry-run / check access / 실제 실행)
+[TH] เลือกแถวที่ต้องทำจากคิวและรันวงรอบหลัก (--dry-run / check access / รันจริง)
+[EN] Selects the rows to process from a queue and runs the main loop (--dry-run / check access / a real run)
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .config import PRICES_USD_PER_M
-from .cp_column import ensure_db_headers
+from .db_columns import ensure_db_headers
 from .db_sync import replace_db_rows
 from .models import Clients, Job, RowResult, RunControl, Usage
 from .processing import process_job
@@ -111,11 +111,17 @@ def explain_no_jobs(values: list[list[str]], sid: str, spec: QueueSpec, *, retry
     if blank_with_url and not include_blank:
         lines.append(f"{blank_with_url} rows have a blank column G but a URL - add --include-blank to process them too")
     if set(counts) <= {"Done"}:
-        lines.append("Every row is already Done - if work is still pending, rebuild the queue (--extract --overwrite) or set the status back to Waiting")
+        lines.append("Every row is already Done - if work is still pending, rebuild the queue (sync queue --overwrite) or set the status back to Waiting")
     return lines
 
 
-def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] = print) -> Summary:
+def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] = print, values: Optional[list[list[str]]] = None) -> Summary:
+    """
+    큐 하나를 처리 (`sync db` 의 AI 부분 / `check access`). values 를 주면 큐 시트를 읽는 대신 그 값(머리글 포함)을 사용 — `sync --dry-run` 에서 앞 단계(queue)가 계획만 한 큐를 보여 줄 때
+    [TH] ประมวลผลคิวหนึ่ง (ส่วน AI ของ `sync db` / `check access`) ถ้าให้ values จะใช้ค่านั้น (รวมหัวตาราง) แทนการอ่านชีตคิว — ใช้ใน `sync --dry-run` เมื่อขั้นก่อนหน้า (queue) แค่วางแผนคิวไว้
+    [EN] Processes one queue (the AI part of `sync db` / `check access`). With values (header row included) they are used instead of reading the queue sheet - for `sync --dry-run`,
+         where the earlier step (queue) only planned the queue
+    """
     spec = SPECS[args.queue]
     sid = args.spreadsheet_id
     allow_thumbnail = not getattr(args, "no_thumbnail", False)
@@ -125,7 +131,8 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
     ctl = RunControl()
     usage = Usage()
 
-    values = read_values(clients.sheets, sid, f"'{spec.queue_tab}'!A1:H")
+    if values is None:
+        values = read_values(clients.sheets, sid, f"'{spec.queue_tab}'!A1:H")
     only_rows = parse_row_spec(args.only_rows) if args.only_rows else None
     jobs = select_jobs(values, retry_errors=not args.no_retry_errors, include_blank=args.include_blank, only_rows=only_rows)
 
@@ -159,9 +166,9 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
 
     tls = threading.local()
 
-    # --check-access: Drive 접근 가능 여부만 확인 (Gemini 호출 없음, 시트 쓰기 없음)
-    # [TH] --check-access: เช็กแค่ว่าเข้าถึงไฟล์ใน Drive ได้ไหม (ไม่เรียก Gemini ไม่เขียนชีต)
-    # [EN] --check-access: only check whether the Drive files are reachable (no Gemini call, no sheet writes)
+    # check access: Drive 접근 가능 여부만 확인 (Gemini 호출 없음, 시트 쓰기 없음)
+    # [TH] check access: เช็กแค่ว่าเข้าถึงไฟล์ใน Drive ได้ไหม (ไม่เรียก Gemini ไม่เขียนชีต)
+    # [EN] check access: only check whether the Drive files are reachable (no Gemini call, no sheet writes)
     if args.check_access:
         # 모든 출력 줄에 어느 큐 시트(MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ)의 결과인지 표시
         # [TH] ทุกบรรทัดของผลลัพธ์ระบุชื่อชีตคิว (MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ) ว่าผลมาจากชีตไหน
@@ -182,7 +189,7 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
         # [EN] The other queue was not checked in this run, so print the command that checks it
         other_key = next((k for k in sorted(SPECS) if k != args.queue), None)
         if other_key and getattr(args, "hint_other_queue", True):
-            log(f"(this run checked only {spec.queue_tab}; for {SPECS[other_key].queue_tab}: python migrate_queue.py --check-access --queue {other_key} --limit 0)")
+            log(f"(this run checked only {spec.queue_tab}; for {SPECS[other_key].queue_tab}: python pmis.py check access --queue {other_key} --limit 0)")
         return summary
 
     # 중복 방지: 이미 DB 에 있는 PDF -> AI 호출 없이 Done 처리. 같은 읽기로 링크가 바뀐 PDF 의 옛 DB 행도 찾음
@@ -348,11 +355,11 @@ def run(args: argparse.Namespace, clients: Clients, log: Callable[[str], None] =
         pin, pout = PRICES_USD_PER_M.get(clients.model, (None, None))
         cost = f" ≈ ${usage.prompt / 1e6 * pin + usage.output / 1e6 * pout:.3f} (list price)" if pin else ""
         log(f"Gemini calls: {usage.calls}, input {usage.prompt:,} tok, output(+thinking) {usage.output:,} tok{cost}")
-    # 실제 실행이 끝날 때마다 이 큐 시트에 마이그레이션 종료 시각을 기록 (--dry-run / --check-access 는 위에서 이미 끝남).
+    # 실제 실행이 끝날 때마다 이 큐 시트에 마이그레이션 종료 시각을 기록 (--dry-run / check access 는 위에서 이미 끝남).
     # 쓰지 못해도 실행 결과는 그대로이므로 경고만 남김
-    # [TH] ทุกครั้งที่รันจริงจบ จะเขียนเวลาที่ migration จบลงชีตคิวนี้ (--dry-run / --check-access จบไปก่อนหน้านี้แล้ว)
+    # [TH] ทุกครั้งที่รันจริงจบ จะเขียนเวลาที่ migration จบลงชีตคิวนี้ (--dry-run / check access จบไปก่อนหน้านี้แล้ว)
     #      ถ้าเขียนไม่ได้ ผลการรันไม่เปลี่ยน จึงแค่เตือน
-    # [EN] Every time a real run finishes, the migration finish time is written to this queue sheet (--dry-run / --check-access returned above).
+    # [EN] Every time a real run finishes, the migration finish time is written to this queue sheet (--dry-run / check access returned above).
     #      A failed write does not change the result of the run, so it only warns
     stamp = time_stamp()
     try:
@@ -374,11 +381,12 @@ def queues_to_run(queue_arg: Optional[str]) -> list[str]:
 
 
 def run_queues(args: argparse.Namespace, clients: Clients, keys: list[str], log: Callable[[str], None] = print,
-               sheet_title: str = "") -> int:
+               sheet_title: str = "", planned: Optional[dict[str, list[list[str]]]] = None) -> int:
     """
-    큐를 차례로 실행하고 종료 코드를 반환 (0 = 정상, 2 = 중단/실패가 있음)
-    [TH] รันทีละคิวตามลำดับ แล้วคืนรหัสออก (0 = ปกติ, 2 = มีการหยุดกลางคัน/ล้มเหลว)
-    [EN] Runs the queues one after another and returns the exit code (0 = fine, 2 = something stopped or failed)
+    큐를 차례로 실행하고 종료 코드를 반환 (0 = 정상, 2 = 중단/실패가 있음). planned 에 있는 큐는 시트 대신 그 값(머리글 포함)으로 실행 (--dry-run 에서 앞 단계가 계획한 큐)
+    [TH] รันทีละคิวตามลำดับ แล้วคืนรหัสออก (0 = ปกติ, 2 = มีการหยุดกลางคัน/ล้มเหลว) คิวที่อยู่ใน planned จะใช้ค่านั้น (รวมหัวตาราง) แทนชีต (คิวที่ขั้นก่อนหน้าวางแผนไว้ตอน --dry-run)
+    [EN] Runs the queues one after another and returns the exit code (0 = fine, 2 = something stopped or failed). A queue that is in planned runs on those values
+         (header row included) instead of the sheet: the queue an earlier step planned in a --dry-run
     """
     multi = len(keys) > 1
     exit_code = 0
@@ -397,7 +405,7 @@ def run_queues(args: argparse.Namespace, clients: Clients, keys: list[str], log:
         log(("\n" if multi else "") + f"===== Queue {spec.name}: {spec.queue_tab} -> {spec.db_tab}"
             + (f" | sheet: {sheet_title}" if sheet_title else "") + " =====")
         try:
-            summary = run(sub, clients, log=log)
+            summary = run(sub, clients, log=log, values=planned[key]) if planned and key in planned else run(sub, clients, log=log)
         except SheetsError as e:
             # 한 큐를 읽지 못해도(예: 시트 탭이 없음) 다음 큐는 계속 진행
             # [TH] อ่านคิวหนึ่งไม่ได้ (เช่นไม่มีแท็บชีต) ก็ยังทำคิวถัดไปต่อ

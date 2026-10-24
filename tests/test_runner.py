@@ -6,8 +6,9 @@
 
 import pytest
 
+from migrator import runner
 from migrator.reports import build_db_row
-from migrator.runner import run, select_jobs
+from migrator.runner import Summary, run, run_queues, select_jobs
 from migrator.specs import SPECS
 from migrator.stamps import MIGRATION_LABEL
 
@@ -133,9 +134,9 @@ def test_dry_run_and_check_access_do_not_write():
     assert any("Reachable: 2/3" in m for m in logs)
 
 
-# --check-access 의 모든 출력 줄에 큐 시트 이름이 표시되고, 다른 큐 안내가 나온다
-# [TH] ทุกบรรทัดผลลัพธ์ของ --check-access ระบุชื่อชีตคิว และมีคำแนะนำสำหรับคิวอีกอัน
-# [EN] Every --check-access result line names the queue sheet, and the other queue is pointed out
+# check access 의 모든 출력 줄에 큐 시트 이름이 표시되고, 다른 큐 안내가 나온다
+# [TH] ทุกบรรทัดผลลัพธ์ของ check access ระบุชื่อชีตคิว และมีคำแนะนำสำหรับคิวอีกอัน
+# [EN] Every check access result line names the queue sheet, and the other queue is pointed out
 @pytest.mark.parametrize("queue, tab, other_tab, other_key", [
     ("dwr", "MIGRATION_QUEUE", "MIGRATION_QUEUE_DRQ", "drq"),
     ("drq", "MIGRATION_QUEUE_DRQ", "MIGRATION_QUEUE", "dwr"),
@@ -151,7 +152,7 @@ def test_check_access_names_the_queue_sheet(queue, tab, other_tab, other_key):
     assert any("Reachable: 2/3" in m for m in tagged)
     # 다른 큐 시트 이름은 "다른 큐 안내" 줄에만 나타나야 한다 / the other sheet is named only in the hint line
     hint = [m for m in logs if f"--queue {other_key}" in m]
-    assert len(hint) == 1 and other_tab in hint[0] and "--check-access" in hint[0]
+    assert len(hint) == 1 and other_tab in hint[0] and f"python pmis.py check access --queue {other_key} --limit 0" in hint[0]
     assert not any(f"[{other_tab}]" in m for m in logs)
 
 
@@ -165,10 +166,36 @@ def test_check_access_hint_for_other_queue_only_when_single_queue():
     w = world(["Waiting"])
     logs = []
     run(ns(check_access=True, hint_other_queue=False), w.clients(), log=logs.append)
-    assert not any("--check-access --queue" in m for m in logs)
+    assert not any("check access --queue" in m for m in logs)
     logs = []
     run(ns(check_access=True), w.clients(), log=logs.append)
-    assert any("--check-access --queue drq" in m for m in logs)
+    assert any("python pmis.py check access --queue drq --limit 0" in m for m in logs)
+
+
+def test_run_uses_the_given_values_instead_of_reading_the_queue_sheet():
+    w = FakeWorld([])                                                          # the queue sheet itself is empty
+    values = [["Doc No", "Date", "Discipline", "PDF URL", "Folder URL", "Status(C/P)", "AI Processed", "Replaces PDF (old file ID)"],
+              qrow(1) + [""], qrow(2, "Done") + [""], qrow(3, "Waiting") + [FID(9)]]
+    logs = []
+    run(ns(dry_run=True), w.clients(), log=logs.append, values=values)
+    assert any("Queue MIGRATION_QUEUE: Done=1, Waiting=2" in m for m in logs) and any("Rows to process: 2" in m for m in logs)
+    assert any("row 2: fileId=" in m for m in logs) and any("row 4: fileId=" in m for m in logs) and not any("row 3:" in m for m in logs)
+    assert w.gemini_calls == 0 and not w.batch_updates and not w.appends
+
+
+def test_run_queues_gives_a_planned_queue_to_run_and_lets_the_others_read_their_sheet(monkeypatch):
+    seen = []
+
+    def spy(args, clients, log=print, values=None):
+        seen.append((args.queue, values))
+        return Summary()
+
+    monkeypatch.setattr(runner, "run", spy)
+    run_queues(ns(queue=None, dry_run=True), None, ["dwr", "drq"], log=lambda m: None, planned={"drq": [["header"], ["row"]]})
+    assert seen == [("dwr", None), ("drq", [["header"], ["row"]])]
+    seen.clear()
+    run_queues(ns(queue=None, dry_run=True), None, ["dwr", "drq"], log=lambda m: None)
+    assert seen == [("dwr", None), ("drq", None)]
 
 
 def test_zero_rows_in_empty_queue_points_to_the_spreadsheet_id():
@@ -183,7 +210,7 @@ def test_zero_rows_when_everything_is_done_lists_the_statuses():
     w = world(["Done", "Done", "Done"])
     logs = run_logs(w)
     assert any("Rows to process: 0" in m for m in logs)
-    assert any("'Done'×3" in m and "'Waiting'" in m for m in logs) and any("Every row is already Done" in m and "--extract --overwrite" in m for m in logs)
+    assert any("'Done'×3" in m and "'Waiting'" in m for m in logs) and any("Every row is already Done" in m and "sync queue --overwrite" in m for m in logs)
 
 
 def test_zero_rows_with_unexpected_status_text_shows_it_exactly():
@@ -328,7 +355,7 @@ def test_a_new_pdf_that_is_already_in_the_db_needs_no_replacement():
     w.db.append(build_db_row(SPECS["dwr"], DWR_JSON, URL(1), FOLDER, "C"))                       # somebody already migrated the new file
     s = run(ns(), w.clients(), log=lambda m: None)
     assert s.reconciled == 1 and w.gemini_calls == 0 and w.queue[1][6] == "Done" and w.queue[1][7] == ""
-    assert w.db[1][1] == "OLD-VERSION"                                                            # the old row is left for --sync-db to remove
+    assert w.db[1][1] == "OLD-VERSION"                                                            # the old row is left for `sync db` to remove
 
 
 def test_replacement_works_with_no_reconcile_too():

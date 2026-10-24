@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs a command with the Google service-account key available, and removes the key afterwards.
 #
-#   SA_KEY_JSON=... bash .github/scripts/with_credentials.sh python migrate_queue.py ...
+#   SA_KEY_JSON=... bash .github/scripts/with_credentials.sh python pmis.py ...
 #
 # SA_KEY_JSON is the whole contents of the key file. It is written to a temporary file readable only by this user
 # (GOOGLE_APPLICATION_CREDENTIALS points to it), the service-account e-mail and project ID are masked in the Actions log,

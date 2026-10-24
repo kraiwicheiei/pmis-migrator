@@ -118,7 +118,7 @@ def test_parse_retries_zero_means_single_call_and_cli_default_is_one():
     s = run(ns(workers=1, parse_retries=0), w.clients(), log=lambda m: None)
     assert s.errors == {"JSON Parse": 1} and w.gemini_calls == 1
     p = build_parser()
-    assert p.parse_args([]).parse_retries == 1 and p.parse_args([]).max_output_tokens is None
+    assert p.parse_args(["sync"]).parse_retries == 1 and p.parse_args(["sync"]).max_output_tokens is None
 
 
 def test_parse_retry_does_not_apply_to_other_errors():
@@ -188,7 +188,7 @@ def test_accept_first_report_option():
     w.gemini_script = [gresp(json.dumps([rep_json("ACME-DWR-CIV-0232", Activities="FIRST"), rep_json("ACME-DWR-CIV-0233")]))]
     s = run(ns(workers=1, parse_retries=0, accept_first_report=True), w.clients(), log=lambda m: None)
     assert (s.done, s.multi_report) == (1, 1) and w.db[1][12] == "FIRST"
-    assert build_parser().parse_args([]).accept_first_report is False
+    assert build_parser().parse_args(["sync"]).accept_first_report is False
 
 
 def test_every_error_written_to_the_sheet_is_english_only():

@@ -1,16 +1,15 @@
 """
---extract 테스트: 새로 만들기, 새로 계산해 기존 행과 맞추기(sync), 다른 파일에서 읽기, 새로고침 시각
-[TH] เทสต์ --extract: สร้างใหม่, คำนวณใหม่แล้วจับคู่กับแถวเดิม (sync), อ่านจากไฟล์อื่น, เวลา refresh
-[EN] Tests for --extract: rebuild, recompute and match with the existing rows (sync), reading from another file, the refresh time
+`sync queue` 테스트: 새로 만들기, 새로 계산해 기존 행과 맞추기(sync), 다른 파일에서 읽기, 새로고침 시각
+[TH] เทสต์ `sync queue`: สร้างใหม่, คำนวณใหม่แล้วจับคู่กับแถวเดิม (sync), อ่านจากไฟล์อื่น, เวลา refresh
+[EN] Tests for `sync queue`: rebuild, recompute and match with the existing rows (sync), reading from another file, the refresh time
 """
 
 import json
 
 import pytest
 
-from migrator import extract as extract_module, legacy_sheet, queue_writer
-from migrator.db_sync import DbSyncSummary
-from migrator.extract import extract_queue, run_extract
+from migrator import legacy_sheet, queue_writer
+from migrator.extract import extract_queue, extract_queues, run_extract
 from migrator.legacy_sheet import LegacyItem
 from migrator.queue_writer import QUEUE_HEADER, clear_replaces, plan_sync, status_rank
 from migrator.sheets import SheetsError
@@ -482,61 +481,41 @@ def test_the_summary_carries_the_queue_rows_the_db_sync_works_on():
     assert extract_logs(empty)[0].queue_rows is None
 
 
-class DbSyncRecorder:
-    """sync_db_for_queue 대신 호출을 기록 / [TH] บันทึกการเรียกแทน sync_db_for_queue / [EN] Records the calls instead of sync_db_for_queue"""
-
-    def __init__(self, result=None, error=None):
-        self.calls, self.result, self.error = [], result or DbSyncSummary(), error
-
-    def __call__(self, args, clients, key, queue_rows, log=print):
-        self.calls.append((key, [list(r) for r in queue_rows], args.dry_run))
-        if self.error:
-            raise self.error
-        return self.result
-
-
-def test_extract_with_sync_db_makes_the_db_match_the_rows_of_the_synced_queue(monkeypatch):
-    recorder = DbSyncRecorder()
-    monkeypatch.setattr(extract_module, "sync_db_for_queue", recorder)
+# --- 큐를 만든 큐들 / the queues that were built / คิวที่สร้างได้ ---
+def test_extract_queues_returns_the_queues_that_were_built_with_their_rows():
     w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in merge_queue()]})
-    assert run_extract(xargs(queue="dwr", sync_db=True), w.clients(), ["dwr"], log=lambda m: None) == 0
-    assert [c[0] for c in recorder.calls] == ["dwr"] and recorder.calls[0][1] == w.queues["MIGRATION_QUEUE"][1:] and recorder.calls[0][2] is False
-    assert "update" not in [e[0] for e in w.events] and w.events[0][0] == "header"                         # the queue was written before the DB was looked at
+    code, built = extract_queues(xargs(queue="dwr"), w.clients(), ["dwr"], log=lambda m: None)
+    assert code == 0 and list(built) == ["dwr"] and built["dwr"].queue_rows == w.queues["MIGRATION_QUEUE"][1:]
+    assert "update" not in [e[0] for e in w.events] and w.events[0][0] == "header"                         # the queue was written; the rows are what is stored now
+    assert run_extract(xargs(queue="dwr"), FakeLegacy().clients(), ["dwr"], log=lambda m: None) == 0       # run_extract is the exit code of the same run
 
 
-def test_extract_with_sync_db_and_dry_run_hands_over_the_planned_rows(monkeypatch):
-    recorder = DbSyncRecorder()
-    monkeypatch.setattr(extract_module, "sync_db_for_queue", recorder)
+def test_extract_queues_dry_run_hands_over_the_planned_rows_and_writes_nothing():
     w = FakeLegacy(queues={"MIGRATION_QUEUE": [list(r) for r in merge_queue()]})
     before = [list(r) for r in w.queues["MIGRATION_QUEUE"]]
-    assert run_extract(xargs(queue="dwr", sync_db=True, dry_run=True), w.clients(), ["dwr"], log=lambda m: None) == 0
-    assert w.queues["MIGRATION_QUEUE"] == before and recorder.calls[0][2] is True and [r[0] for r in recorder.calls[0][1]] == [r[0] for r in DWR_ROWS]
+    code, built = extract_queues(xargs(queue="dwr", dry_run=True), w.clients(), ["dwr"], log=lambda m: None)
+    assert code == 0 and w.queues["MIGRATION_QUEUE"] == before and w.events == []
+    assert [r[0] for r in built["dwr"].queue_rows] == [r[0] for r in DWR_ROWS]
 
 
-def test_extract_without_sync_db_never_touches_the_db(monkeypatch):
-    recorder = DbSyncRecorder()
-    monkeypatch.setattr(extract_module, "sync_db_for_queue", recorder)
-    run_extract(xargs(queue="dwr"), FakeLegacy().clients(), ["dwr"], log=lambda m: None)
-    assert recorder.calls == []
-
-
-def test_extract_skips_the_db_sync_of_a_queue_that_was_refused_or_failed(monkeypatch):
-    recorder = DbSyncRecorder()
-    monkeypatch.setattr(extract_module, "sync_db_for_queue", recorder)
+def test_extract_queues_leaves_out_a_queue_that_was_refused_failed_or_empty():
     bad_header = FakeLegacy(queues={"MIGRATION_QUEUE": [["Doc", "Date"], qrow(1, "Done")]})
-    assert run_extract(xargs(queue="dwr", sync_db=True), bad_header.clients(), ["dwr"], log=lambda m: None) == 2
+    assert extract_queues(xargs(queue="dwr"), bad_header.clients(), ["dwr"], log=lambda m: None) == (2, {})
     too_many = FakeLegacy(queues=queue_with_junk(130))
-    assert run_extract(xargs(queue="dwr", sync_db=True), too_many.clients(), ["dwr"], log=lambda m: None) == 2
+    assert extract_queues(xargs(queue="dwr"), too_many.clients(), ["dwr"], log=lambda m: None) == (2, {})
     missing = FakeLegacy(grids={"LEGACY-DRQ": legacy_grid()})
-    assert run_extract(xargs(queue="dwr", sync_db=True), missing.clients(), ["dwr"], log=lambda m: None) == 2
-    assert recorder.calls == []
+    assert extract_queues(xargs(queue="dwr"), missing.clients(), ["dwr"], log=lambda m: None) == (2, {})
+    empty = FakeLegacy(grids={"LEGACY-DWR": {3: LEGACY_HEADER, 4: mk({0: txt("R-1"), 4: txt("x")})}, "LEGACY-DRQ": {}})
+    assert extract_queues(xargs(queue="dwr"), empty.clients(), ["dwr"], log=lambda m: None) == (0, {})   # nothing to build is not an error, but nothing was built either
 
 
-def test_extract_with_sync_db_reports_a_refused_or_failed_db_sync_in_the_exit_code(monkeypatch):
+def test_extract_queues_dry_run_does_not_fail_on_a_refusal_but_still_leaves_the_queue_out():
+    too_many = FakeLegacy(queues=queue_with_junk(130))
+    assert extract_queues(xargs(queue="dwr", dry_run=True), too_many.clients(), ["dwr"], log=lambda m: None) == (0, {})
+
+
+def test_extract_queues_keeps_going_with_the_other_queue_after_one_failed():
+    w = FakeLegacy(grids={"LEGACY-DWR": legacy_grid()})                                    # the DRQ legacy tab is missing
     logs = []
-    monkeypatch.setattr(extract_module, "sync_db_for_queue", DbSyncRecorder(result=DbSyncSummary(refused="too many removals")))
-    assert run_extract(xargs(queue="dwr", sync_db=True), FakeLegacy().clients(), ["dwr"], log=logs.append) == 2
-    assert run_extract(xargs(queue="dwr", sync_db=True, dry_run=True), FakeLegacy().clients(), ["dwr"], log=logs.append) == 0
-    monkeypatch.setattr(extract_module, "sync_db_for_queue", DbSyncRecorder(error=SheetsError("HTTP 403: boom")))
-    assert run_extract(xargs(queue="dwr", sync_db=True), FakeLegacy().clients(), ["dwr"], log=logs.append) == 2
-    assert any("✗ Could not sync DB_DWR: HTTP 403: boom" in m for m in logs)
+    code, built = extract_queues(xargs(queue=None), w.clients(), ["dwr", "drq"], log=logs.append)
+    assert code == 2 and list(built) == ["dwr"] and any("Could not build queue MIGRATION_QUEUE_DRQ" in m for m in logs)

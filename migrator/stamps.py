@@ -1,7 +1,7 @@
 """
-큐 시트에 적는 시각 표시: --extract 의 새로고침 시각(I열)과 마이그레이션 실행 시각(K열)
-[TH] เวลาที่เขียนลงชีตคิว: เวลา refresh ของ --extract (คอลัมน์ I) และเวลาที่รัน migration (คอลัมน์ K)
-[EN] The times written to the queue sheet: the --extract refresh time (column I) and the migration run time (column K)
+큐 시트에 적는 시각 표시: `sync queue` 의 새로고침 시각(I열)과 마이그레이션 실행 시각(K열)
+[TH] เวลาที่เขียนลงชีตคิว: เวลา refresh ของ `sync queue` (คอลัมน์ I) และเวลาที่รัน migration (คอลัมน์ K)
+[EN] The times written to the queue sheet: the `sync queue` refresh time (column I) and the migration run time (column K)
 """
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ from .sheets import sheets_call, values_url
 
 
 # 큐 시트의 시각 칸: 1행 = 라벨, 2행 = 시각. A~G열(큐 데이터) 밖이라 처리/중복 확인에 영향이 없음
-#   I열 = --extract 가 큐를 쓴 마지막 시각, K열 = 마이그레이션(Gemini 실행)이 끝난 마지막 시각, H/J열은 비워 둠
+#   I열 = `sync queue` 가 큐를 쓴 마지막 시각, K열 = 마이그레이션(Gemini 실행)이 끝난 마지막 시각, H/J열은 비워 둠
 # [TH] ช่องเวลาในชีตคิว: แถว 1 = ป้ายชื่อ, แถว 2 = เวลา อยู่นอกข้อมูลคิว (คอลัมน์ A~G) จึงไม่กระทบการประมวลผล/ตรวจซ้ำ
-#      คอลัมน์ I = เวลาล่าสุดที่ --extract เขียนคิว, คอลัมน์ K = เวลาล่าสุดที่ migration (รัน Gemini) จบ, เว้นคอลัมน์ H/J ไว้ว่าง
+#      คอลัมน์ I = เวลาล่าสุดที่ `sync queue` เขียนคิว, คอลัมน์ K = เวลาล่าสุดที่ migration (รัน Gemini) จบ, เว้นคอลัมน์ H/J ไว้ว่าง
 # [EN] The time cells of the queue sheet: row 1 = label, row 2 = time. They are outside the queue data (columns A-G),
 #      so processing and the duplicate check are not affected.
-#      Column I = when --extract last wrote the queue, column K = when the migration (the Gemini run) last finished; H and J stay empty
+#      Column I = when `sync queue` last wrote the queue, column K = when the migration (the Gemini run) last finished; H and J stay empty
 REFRESH_COL = "I"
 QUEUE_REFRESH_LABEL = "Last extract (refresh time)"
 MIGRATION_COL = "K"

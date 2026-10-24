@@ -1,5 +1,9 @@
-# Run the MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ migration (PDF -> Gemini -> DB) on GitHub-hosted runners.
-# Building the queues from the legacy sheets is a separate workflow: extract.yml
+# The db step of the sync (`python pmis.py sync db`) on GitHub-hosted runners: part 1 fixes DB_DWR / DB_DRQ to match the queue (C/P, Folder Link, tags, removals; no AI), part 2 reads the PDFs
+# of the Waiting rows of MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ with Gemini and writes the DB. With only_rows only part 2 runs, for those rows. Syncing the queues with the legacy sheets
+# is a separate workflow: extract.yml (`sync queue db --no-ai`); sync.yml runs the queue step and the whole db step in one go.
+#
+# The file name and the values of the mode input are kept from the time this workflow was called "Migrate queue", so calls that already exist
+# (for example from cron-job.org) keep working.
 #
 # Required repository secrets (Settings > Secrets and variables > Actions > Secrets):
 #   SA_KEY_JSON          the whole contents of the service-account key file (.json)
@@ -8,15 +12,15 @@
 # as a fallback, and the variable wins over it:
 #   PMIS_SPREADSHEET_ID  ID of the target spreadsheet
 #
-# Start with mode = dry-run, then check-access, then run with a small limit.
+# Start with mode = dry-run, then check-access (`python pmis.py check access`), then run with a small limit.
 # The log shows counts only (--public-log); the details are in column G of the queue sheet.
-name: Migrate queue
+name: Sync DB (with AI)
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "dry-run = list rows only | check-access = check Drive access only | run = migrate for real"
+        description: "dry-run = show the plan, write nothing | check-access = check Drive access only | run = fix the DB rows and read the Waiting PDFs with Gemini, for real"
         type: choice
         options: [dry-run, check-access, run]
         default: dry-run
@@ -30,7 +34,7 @@ on:
         type: string
         default: "30"
       only_rows:
-        description: "Only these sheet rows, e.g. 83,102,127-128 (needs queue = dwr or drq)"
+        description: "Only these sheet rows, e.g. 83,102,127-128 (needs queue = dwr or drq). Only the AI part runs, for those rows"
         type: string
         default: ""
       accept_first_report:
@@ -45,9 +49,9 @@ on:
 # No `schedule:` here: runs are started from outside (cron-job.org calls the workflow_dispatch API),
 # because GitHub's own cron was not starting runs for this repository.
 
-# Never run two migrations (or a migration and an extract) at the same time: both would touch the same queue rows
+# Never run two syncs at the same time (a db run, a queue sync or a full sync): they would touch the same queue rows
 concurrency:
-  group: migrate-queue
+  group: pmis-sync
   cancel-in-progress: false
 
 permissions:
@@ -61,10 +65,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-python-deps
         with:
-          extra-packages: pytest
+          extra-packages: pytest pyyaml
       - run: python -m pytest -q
 
-  migrate:
+  sync-db:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -75,7 +79,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-python-deps
 
-      - name: Migrate
+      - name: Sync DB (with AI)
         shell: bash
         env:
           # Inputs go through environment variables (never pasted into the script text)
@@ -97,11 +101,12 @@ jobs:
           # a variable is not masked by GitHub like a secret is, so mask the ID explicitly (the script never prints it anyway: --public-log)
           echo "::add-mask::$PMIS_SPREADSHEET_ID"
 
-          args=(--public-log)
           case "$IN_MODE" in
-            dry-run) args+=(--dry-run) ;;
-            check-access) args+=(--check-access) ;;
-            run) [[ -n "$GEMINI_API_KEY" ]] || die "Secret GEMINI_API_KEY is missing or empty (needed for mode = run)" ;;
+            dry-run) args=(sync db --public-log --dry-run) ;;
+            check-access) args=(check access --public-log) ;;
+            run)
+              [[ -n "$GEMINI_API_KEY" ]] || die "Secret GEMINI_API_KEY is missing or empty (needed for mode = run)"
+              args=(sync db --public-log) ;;
             *) die "Unknown mode: $IN_MODE" ;;
           esac
           case "$IN_QUEUE" in
@@ -126,13 +131,13 @@ jobs:
 
           # --public-log prints counts only. Anything the script writes to stderr (tracebacks, setup errors) goes to a file
           # that is never printed: the repository may be public, and the details can contain names and IDs.
-          echo "Running: python migrate_queue.py ${args[*]}"
+          echo "Running: python pmis.py ${args[*]}"
           set +e
-          bash .github/scripts/with_credentials.sh python migrate_queue.py "${args[@]}" 2> "$RUNNER_TEMP/stderr.log" | tee >(grep -v '^::' > "$RUNNER_TEMP/counts.log")
+          bash .github/scripts/with_credentials.sh python pmis.py "${args[@]}" 2> "$RUNNER_TEMP/stderr.log" | tee >(grep -v '^::' > "$RUNNER_TEMP/counts.log")
           status=${PIPESTATUS[0]}
           set -e
           if [[ $status -ne 0 ]]; then
-            echo "::error::migrate_queue.py exited with code $status (2 = stopped early or a queue could not be read). Row details are in column G of the queue sheet; run the script locally for the full log."
+            echo "::error::pmis.py exited with code $status (2 = stopped early, a queue could not be read, or a queue / DB was refused by the safety net). Row details are in column G of the queue sheet; run the script locally for the full log."
           fi
           exit "$status"
 
@@ -141,4 +146,4 @@ jobs:
         shell: bash
         env:
           PMIS_SPREADSHEET_ID: ${{ vars.PMIS_SPREADSHEET_ID || secrets.PMIS_SPREADSHEET_ID }}
-        run: bash .github/scripts/job_summary.sh "Migration run" "$RUNNER_TEMP/counts.log"
+        run: bash .github/scripts/job_summary.sh "Sync DB run" "$RUNNER_TEMP/counts.log"

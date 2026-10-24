@@ -29,7 +29,7 @@ def test_legacy_sheet_names_come_only_from_the_environment():
         require_legacy_sheet_names(["dwr", "drq"], env)
     msg = str(e.value.code)
     assert "PMIS_LEGACY_DRQ_SHEET" in msg and "PMIS_LEGACY_DWR_SHEET" not in msg and '$env:PMIS_LEGACY_DRQ_SHEET = "<' in msg
-    assert not hasattr(build_parser().parse_args([]), "legacy_sheet")           # 명령줄 옵션 없음 / [TH] ไม่มีออปชันบรรทัดคำสั่ง / [EN] no command-line option
+    assert not hasattr(build_parser().parse_args(["sync"]), "legacy_sheet")           # 명령줄 옵션 없음 / [TH] ไม่มีออปชันบรรทัดคำสั่ง / [EN] no command-line option
 
 
 def test_load_env_file_sets_missing_variables_but_never_overrides(tmp_path, monkeypatch):

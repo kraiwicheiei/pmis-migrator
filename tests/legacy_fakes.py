@@ -1,7 +1,7 @@
 """
---extract 테스트용 가짜 옛 시트와 도우미
-[TH] ชีตเก่าจำลองและตัวช่วยสำหรับเทสต์ --extract
-[EN] The fake legacy sheet and the helpers for the --extract tests
+`sync queue` 테스트용 가짜 옛 시트와 도우미
+[TH] ชีตเก่าจำลองและตัวช่วยสำหรับเทสต์ `sync queue`
+[EN] The fake legacy sheet and the helpers for the `sync queue` tests
 """
 
 import datetime

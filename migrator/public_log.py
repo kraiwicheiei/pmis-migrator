@@ -22,8 +22,6 @@ _CUT: list[tuple[re.Pattern, str]] = [
     (re.compile(r"^(⚠ The run finished, but the migration time could not be written).*$"), r"\1 (run locally for the reason)"),
     (re.compile(r"^(Stopped early: Gemini answered [^:]+):.*$"), r"\1"),
     (re.compile(r"^(\d+ rows are already in DB_[A-Z]+ -> marked Done without calling the AI) \(rows: .*\)$"), r"\1"),
-    (re.compile(r"^(===== Backfill C/P \w+: [A-Z_]+ <- [A-Z_]+)( \| sheet: .*)? =====$"), r"\1 ====="),
-    (re.compile(r"^(✗ Could not backfill C/P in DB_[A-Z]+):.*$"), r"\1 - run the script locally for the reason"),
     (re.compile(r"^(✗ Could not sync DB_[A-Z]+):.*$"), r"\1 - run the script locally for the reason"),
     (re.compile(r"^(===== Sync DB \w+: [A-Z_]+ <- [A-Z_]+)( \| sheet: .*)? =====$"), r"\1 ====="),
     (re.compile(r"^(  ✗ Not syncing [A-Z_]+: \d+ rows would be removed, more than the limit of \d+) \(.*$"), r"\1 - check the legacy sheet, then use --allow-large-removal"),
@@ -35,14 +33,18 @@ _CUT: list[tuple[re.Pattern, str]] = [
 _KEEP = re.compile(
     r"^(?:"
     r"Queue [A-Z_]+: |Rows to process|Finished:|All queues|Of the Done rows|Stopped early|Gemini calls:"
-    r"|Migration time written to|Replaced in place: |\(dry-run|\[[A-Z_]+\] Reachable|\[[A-Z]+\] Backfill C/P in DB_[A-Z]+: |\[[A-Z]+\] Sync DB_[A-Z]+: "
-    r"|  (?:✓ Wrote queue|✓ Synced [A-Z_]+: |ℹ \d+ Done rows got a new PDF link|⚠ \d+ removed rows were Done / Error|✓ Refresh time written to [A-Z_]+!I2"
+    r"|▶ Step \d/\d - sync (?:queue|db): |Sync steps: (?:queue|db) (?:OK|FAILED|skipped)"
+    r"|Migration time written to|Replaced in place: |\(dry-run|\[[A-Z_]+\] Reachable|\[[A-Z]+\] Sync DB_[A-Z]+: "
+    r"|  (?:↷ (?:skipped: no queue is left|(?:DWR|DRQ)(?:, (?:DWR|DRQ))?: not built, so the next step skips it)"
+    r"|✓ Wrote queue|✓ Synced [A-Z_]+: |ℹ \d+ Done rows got a new PDF link|⚠ \d+ removed rows were Done / Error|✓ Refresh time written to [A-Z_]+!I2"
     r"|⚠ \d+ items have no PDF link|⚠ skipped \d+ cells|⚠ --overwrite: |No items found"
     r"|✗ The header row of [A-Z_]+ is not the expected one|\(--dry-run\) nothing was written"
-    r"|✓ Filled C/P in DB_[A-Z]+![A-Z]+: |✓ Wrote the header '[A-Za-z /()]+' to DB_[A-Z]+![A-Z]+1"
-    r"|✓ Updated C/P in DB_[A-Z]+![A-Z]+: |✓ Legacy sync tag in DB_[A-Z]+![A-Z]+: set on \d+ rows, cleared on \d+ rows"
+    r"|✓ Wrote the header '[A-Za-z /()]+' to DB_[A-Z]+![A-Z]+1"
+    r"|✓ Updated C/P in DB_[A-Z]+![A-Z]+: |✓ Updated Folder Link in DB_[A-Z]+![A-Z]+: "
+    r"|✓ Legacy sync tag in DB_[A-Z]+![A-Z]+: Synced on \d+ rows, Outdated on \d+ rows, cleared on \d+ rows"
     r"|✓ Removed \d+ rows from DB_[A-Z]+ \(copied to |✓ DB_[A-Z]+ already matches the queue"
     r"|✗ Not syncing [A-Z_]+: \d+ rows would be removed|✗ Not syncing DB_[A-Z]+: the queue has no rows)"
+    r"|  Part [12]/2 - (?:update the DB rows \(no AI\): C/P, Folder Link, tags, removals|AI: read the PDFs of the Waiting rows)"
     r"|    Fix the header|    +\S.*? ·{3,} "
     r")"
 )

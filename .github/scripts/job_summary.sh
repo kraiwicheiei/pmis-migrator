@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Adds the (already public-safe) output of a run to the job summary.
 #
-#   PMIS_SPREADSHEET_ID=... bash .github/scripts/job_summary.sh "Migration run" "$RUNNER_TEMP/counts.log"
+#   PMIS_SPREADSHEET_ID=... bash .github/scripts/job_summary.sh "Sync DB run" "$RUNNER_TEMP/counts.log"
 #
-# The output comes from migrate_queue.py --public-log (counts only); the spreadsheet ID is masked once more, to be safe.
+# The output comes from pmis.py --public-log (counts only); the spreadsheet ID is masked once more, to be safe.
 set -euo pipefail
 
 title="${1:?title}"
