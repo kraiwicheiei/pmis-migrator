@@ -1,14 +1,11 @@
 # Sync the queues with the legacy sheets without the AI: `python pmis.py sync queue db --no-ai`. The queue step builds / syncs MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ from the legacy tabs
-# and, right after, part 1 of the db step (input sync_db) fixes DB_DWR / DB_DRQ to match them. No Gemini call, so no Gemini key. Part 2 of the db step (the AI reads the PDFs of the
-# Waiting rows) is the workflow migrate.yml; sync.yml runs the queue step and the whole db step (with the AI) in one go.
+# and, right after, part 1 of the db step (input db) fixes DB_DWR / DB_DRQ to match them. No Gemini call, so no Gemini key. Part 2 of the db step (the AI reads the PDFs of the
+# Waiting rows) is the workflow sync-db.yml; sync.yml runs the queue step and the whole db step (with the AI) in one go.
 #
 # The chain: legacy sheet --queue--> queue --db--> DB. Part 1 of the db step removes the DB rows that came from the legacy sheet (tag 'Synced' or 'Outdated') but whose PDF is not in the queue any more
 # (copied to a _REMOVED_<tab> tab first), updates C/P and Folder Link, and sets the tag in column 'Legacy sync' ('Synced' = checked against the queue, 'Outdated' = the PDF changed and the AI has not replaced the row yet;
 # a row that never came from the legacy sheet has no tag and is never removed). A Done row whose PDF changed in the legacy sheet goes back to Waiting, so the next `sync db` with the AI
-# (migrate.yml or sync.yml) reads the new file and replaces the old DB row in place.
-#
-# The file name and the values of the mode input are kept from the time this workflow was called "Extract queue" (mode = extract), so calls that already exist
-# (for example from cron-job.org) keep working.
+# (sync-db.yml or sync.yml) reads the new file and replaces the old DB row in place.
 #
 # Required repository secret (Settings > Secrets and variables > Actions > Secrets):
 #   SA_KEY_JSON                 the whole contents of the service-account key file (.json)
@@ -24,7 +21,7 @@
 #                               Share that file with the service account (Viewer is enough).
 # Variables are not masked in the log, so the script never prints them (--public-log), and the legacy file's ID / URL is masked explicitly.
 #
-# Start with mode = dry-run (reads the legacy tabs and the DB, writes nothing), then run with mode = extract.
+# Start with mode = dry-run (reads the legacy tabs and the DB, writes nothing), then run with mode = sync.
 # Safety net: a run that would remove more rows than the limit (the larger of 10% of the rows and 100) from the queue or a DB is refused; allow_large_removal lifts it.
 # A queue that already has rows is SYNCED (every row is recomputed from the legacy sheet and the status of the existing row is kept);
 # overwrite rebuilds it from scratch (every row Waiting).
@@ -35,9 +32,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "dry-run = read the legacy tabs and show the plan, write nothing | extract = sync the queues for real (the name is kept for existing calls)"
+        description: "dry-run = read the legacy tabs and show the plan, write nothing | sync = sync the queues (and the DB rows) for real"
         type: choice
-        options: [dry-run, extract]
+        options: [dry-run, sync]
         default: dry-run
       queue:
         description: "Which queue: both = DWR then DRQ"
@@ -52,7 +49,7 @@ on:
         description: "Rebuild the queue from scratch instead of syncing (clears it: every row becomes Waiting and every Done/Error status is wiped). Normally leave this off"
         type: boolean
         default: false
-      sync_db:
+      db:
         description: "Also run part 1 of the db step (no AI) after the queue step: make DB_DWR / DB_DRQ match the queue (remove the DB rows that came from the legacy sheet and whose PDF is not in the queue any more, copied to a _REMOVED_<tab> tab first; a row that never came from the legacy sheet is kept; update C/P and Folder Link; set the Legacy sync tag). Turn off to sync only the queue"
         type: boolean
         default: true
@@ -61,7 +58,7 @@ on:
         type: boolean
         default: false
 
-# Same group as migrate.yml and sync.yml: two syncs never run at the same time
+# Same group as sync-db.yml and sync.yml: two syncs never run at the same time
 concurrency:
   group: pmis-sync
   cancel-in-progress: false
@@ -99,7 +96,7 @@ jobs:
           IN_QUEUE: ${{ inputs.queue || 'both' }}
           IN_LEGACY_SPREADSHEET: ${{ inputs.legacy_spreadsheet || '' }}
           IN_OVERWRITE: ${{ inputs.overwrite || false }}
-          IN_SYNC_DB: ${{ inputs.sync_db }}
+          IN_DB: ${{ inputs.db }}
           IN_ALLOW_LARGE_REMOVAL: ${{ inputs.allow_large_removal || false }}
           SA_KEY_JSON: ${{ secrets.SA_KEY_JSON }}
           # variable first, then the secret of the same name (the old way) as a fallback
@@ -116,14 +113,14 @@ jobs:
           # a variable is not masked by GitHub like a secret is, so mask the ID explicitly (the script never prints it anyway: --public-log)
           echo "::add-mask::$PMIS_SPREADSHEET_ID"
 
-          # the steps: queue always; db unless sync_db is explicitly false (an API call that leaves the input out gets the default, on).
+          # the steps: queue always; db unless the input db is explicitly false (an API call that leaves the input out gets the default, on).
           # --no-ai: this workflow never calls Gemini (the db step runs only its part 1)
           steps=(queue)
-          [[ "${IN_SYNC_DB:-true}" == "false" ]] || steps+=(db)
+          [[ "${IN_DB:-true}" == "false" ]] || steps+=(db)
           args=(sync "${steps[@]}" --no-ai --public-log)
           case "$IN_MODE" in
             dry-run) args+=(--dry-run) ;;
-            extract) ;;
+            sync) ;;
             *) die "Unknown mode: $IN_MODE" ;;
           esac
           case "$IN_QUEUE" in

@@ -1,18 +1,16 @@
 # The db step of the sync (`python pmis.py sync db`) on GitHub-hosted runners: part 1 fixes DB_DWR / DB_DRQ to match the queue (C/P, Folder Link, tags, removals; no AI), part 2 reads the PDFs
 # of the Waiting rows of MIGRATION_QUEUE / MIGRATION_QUEUE_DRQ with Gemini and writes the DB. With only_rows only part 2 runs, for those rows. Syncing the queues with the legacy sheets
-# is a separate workflow: extract.yml (`sync queue db --no-ai`); sync.yml runs the queue step and the whole db step in one go.
-#
-# The file name and the values of the mode input are kept from the time this workflow was called "Migrate queue", so calls that already exist
-# (for example from cron-job.org) keep working.
+# is a separate workflow: sync-no-ai.yml (`sync queue db --no-ai`); sync.yml runs the queue step and the whole db step in one go.
 #
 # Required repository secrets (Settings > Secrets and variables > Actions > Secrets):
 #   SA_KEY_JSON          the whole contents of the service-account key file (.json)
-#   GEMINI_API_KEY       Gemini API key (only needed when mode = run)
+#   GEMINI_API_KEY       Gemini API key (only needed when mode = sync)
 # Required repository VARIABLE (the Variables tab; a plain setting, not a credential). A secret with the same name still works
 # as a fallback, and the variable wins over it:
 #   PMIS_SPREADSHEET_ID  ID of the target spreadsheet
 #
-# Start with mode = dry-run, then check-access (`python pmis.py check access`), then run with a small limit.
+# Start with mode = dry-run, then check-access (`python pmis.py check access`), then sync with a small limit.
+# Safety net: a run that would remove more rows than the limit (the larger of 10% of the rows and 100) from a DB is refused (part 1 is skipped, the AI part still runs); allow_large_removal lifts it.
 # The log shows counts only (--public-log); the details are in column G of the queue sheet.
 name: Sync DB (with AI)
 
@@ -20,9 +18,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "dry-run = show the plan, write nothing | check-access = check Drive access only | run = fix the DB rows and read the Waiting PDFs with Gemini, for real"
+        description: "dry-run = show the plan, write nothing | check-access = check Drive access only | sync = fix the DB rows and read the Waiting PDFs with Gemini, for real"
         type: choice
-        options: [dry-run, check-access, run]
+        options: [dry-run, check-access, sync]
         default: dry-run
       queue:
         description: "Which queue: both = DWR then DRQ"
@@ -45,6 +43,10 @@ on:
         description: "Gemini maxOutputTokens, e.g. 16000 (empty = not set). Use when the cell says finishReason=MAX_TOKENS"
         type: string
         default: ""
+      allow_large_removal:
+        description: "Allow part 1 to remove more DB rows than the safety limit (the larger of 10% of the rows and 100). Normally leave this off. Not for mode = check-access"
+        type: boolean
+        default: false
 
 # No `schedule:` here: runs are started from outside (cron-job.org calls the workflow_dispatch API),
 # because GitHub's own cron was not starting runs for this repository.
@@ -89,6 +91,7 @@ jobs:
           IN_ONLY_ROWS: ${{ inputs.only_rows || '' }}
           IN_ACCEPT_FIRST: ${{ inputs.accept_first_report || false }}
           IN_MAX_TOKENS: ${{ inputs.max_output_tokens || '' }}
+          IN_ALLOW_LARGE_REMOVAL: ${{ inputs.allow_large_removal || false }}
           SA_KEY_JSON: ${{ secrets.SA_KEY_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           # variable first, then the secret of the same name (the old way) as a fallback
@@ -104,8 +107,8 @@ jobs:
           case "$IN_MODE" in
             dry-run) args=(sync db --public-log --dry-run) ;;
             check-access) args=(check access --public-log) ;;
-            run)
-              [[ -n "$GEMINI_API_KEY" ]] || die "Secret GEMINI_API_KEY is missing or empty (needed for mode = run)"
+            sync)
+              [[ -n "$GEMINI_API_KEY" ]] || die "Secret GEMINI_API_KEY is missing or empty (needed for mode = sync)"
               args=(sync db --public-log) ;;
             *) die "Unknown mode: $IN_MODE" ;;
           esac
@@ -127,6 +130,10 @@ jobs:
           fi
           if [[ "$IN_ACCEPT_FIRST" == "true" ]]; then
             args+=(--accept-first-report)
+          fi
+          if [[ "$IN_ALLOW_LARGE_REMOVAL" == "true" ]]; then
+            [[ "$IN_MODE" != check-access ]] || die "allow_large_removal does not apply to mode = check-access"
+            args+=(--allow-large-removal)
           fi
 
           # --public-log prints counts only. Anything the script writes to stderr (tracebacks, setup errors) goes to a file

@@ -176,7 +176,7 @@ python pmis.py sync queue --queue drq   # เฉพาะคิวเดีย�
   - **ลบ** แถวใน DB ที่ PDF ไม่อยู่ในคิวแล้ว **เฉพาะแถวที่ Status เป็น `AI Migrated` และมีป้าย `Synced` หรือ `Outdated`** คือแถวที่มาจากชีตเก่าแล้วหายไปจากชีตเก่า (แถวที่คนพิมพ์เอง และแถวที่ไม่เคยมาจากชีตเก่า เช่นเอกสารที่ระบบอื่นเพิ่มเข้ามา จะไม่ถูกลบเด็ดขาด) และเก็บแถวที่ PDF รอการแทนที่ในคอลัมน์ H ไว้ **ก่อนลบจะคัดลอกแถวไปที่แท็บ `_REMOVED_DB_DWR` / `_REMOVED_DB_DRQ`** (เวลา, แท็บ, เลขแถวเดิม, เหตุผล และเซลล์เดิมทั้งหมด ถ้าไม่มีแท็บจะสร้างให้) จึงไม่มีอะไรหาย
   ก่อนเขียนจะอ่านคอลัมน์ PDF อีกครั้ง ถ้ามีแถวถูกแทรกหรือลบระหว่างนั้นจะหยุดโดยไม่แก้อะไร รันซ้ำแล้วไม่มีอะไรเปลี่ยนก็ไม่เขียนอะไร
 - **ตัวกันพลาด:** ถ้าคิวไม่มีแถว หรือจะลบแถวมากกว่าเพดาน (ค่าที่มากกว่าระหว่าง 10% ของแถวใน DB กับ 100) จะไม่เขียนอะไรลง DB นั้น (`--allow-large-removal` ปลดเพดาน และ `--dry-run` ไม่ล้มเพราะเรื่องนี้) แถวถูกลบออกจากชีตจริง ชีตอื่นที่อ้างแถวของ DB ด้วยตำแหน่งอาจเลื่อน ควรดูแผนด้วย `--dry-run` ก่อน
-- **บน GitHub Actions:** ดู "รันบน GitHub Actions": **Sync all** รันทั้งสายงาน **Sync queue and DB (no AI)** รัน `sync queue db --no-ai` (ขั้น `db` คือ input `sync_db` ที่เปิดเป็นค่าเริ่มต้น) และ **Sync DB (with AI)** รัน `sync db` ให้รันด้วย `mode = dry-run` ก่อน log แสดงแค่ตัวเลข
+- **บน GitHub Actions:** ดู "รันบน GitHub Actions": **Sync all** รันทั้งสายงาน **Sync queue and DB (no AI)** รัน `sync queue db --no-ai` (ขั้น `db` คือ input `db` ที่เปิดเป็นค่าเริ่มต้น) และ **Sync DB (with AI)** รัน `sync db` ให้รันด้วย `mode = dry-run` ก่อน log แสดงแค่ตัวเลข
 - **ป้าย `Legacy sync`:** คอลัมน์ถัดจาก C/P (**`U` ใน `DB_DWR`, `T` ใน `DB_DRQ`** หัวตาราง `Legacy sync`) บอกว่าแถวใน DB ตรงกับชีตเก่าหรือไม่:
 
   | ป้าย | ความหมาย |
@@ -215,8 +215,8 @@ workflow สามตัวรันสคริปต์ตัวเดีย�
 | workflow (แท็บ Actions) | ไฟล์ | รัน | ต้องใช้ |
 |---|---|---|---|
 | **Sync all** | `.github/workflows/sync.yml` | `python pmis.py sync` (queue -> db พร้อม AI) | `GEMINI_API_KEY` และ variables ของชีตเก่า |
-| **Sync queue and DB (no AI)** | `.github/workflows/extract.yml` | `python pmis.py sync queue db --no-ai` (ไม่เรียก Gemini) | variables ของชีตเก่า |
-| **Sync DB (with AI)** | `.github/workflows/migrate.yml` | `python pmis.py sync db` (ส่วน 1 แล้วตามด้วย AI) หรือ `check access` | `GEMINI_API_KEY` |
+| **Sync queue and DB (no AI)** | `.github/workflows/sync-no-ai.yml` | `python pmis.py sync queue db --no-ai` (ไม่เรียก Gemini) | variables ของชีตเก่า |
+| **Sync DB (with AI)** | `.github/workflows/sync-db.yml` | `python pmis.py sync db` (ส่วน 1 แล้วตามด้วย AI) หรือ `check access` | `GEMINI_API_KEY` |
 
 repo แบบ private บนแพ็กเกจ GitHub Free ได้ Actions 2,000 นาทีต่อเดือน
 
@@ -236,15 +236,15 @@ gh variable set PMIS_SPREADSHEET_ID --body "<ID สเปรดชีต>"      
 
 วิธี sync ทั้งหมด: แท็บ Actions > **Sync all** > Run workflow ด้วย `mode = dry-run` (แสดงแผนของทั้งสองขั้น ไม่เขียนอะไร) แล้วค่อย `mode = sync` ด้วย `limit` น้อยๆ ช่อง `queue` เลือก DWR / DRQ / ทั้งสอง, `legacy_spreadsheet` ชี้ไปไฟล์อื่น, `allow_large_removal` ปลดเพดานตัวกันพลาด ถ้าใช้บรรทัดคำสั่ง: `gh workflow run sync.yml -f mode=dry-run`
 
-วิธี sync เฉพาะคิวและแก้แถวใน DB โดยไม่ใช้ AI: แท็บ Actions > **Sync queue and DB (no AI)** > Run workflow ด้วย `mode = dry-run` (อ่านแท็บชีตเก่า ไม่เขียนอะไร) แล้วค่อย `mode = extract` (ค่านี้ยังใช้ชื่อเดิมเพื่อให้การเรียกที่มีอยู่แล้วยังใช้ได้) `sync_db` (เปิดเป็นค่าเริ่มต้น) รันส่วน 1 ของขั้น `db` ต่อ ทำให้ DB_DWR / DB_DRQ ตรงกับคิว, `overwrite` สร้างใหม่ทั้งคิวแทนการ sync (รันตามเวลาอย่าเปิดตัวนี้) ถ้าใช้บรรทัดคำสั่ง: `gh workflow run extract.yml -f mode=dry-run`
+วิธี sync เฉพาะคิวและแก้แถวใน DB โดยไม่ใช้ AI: แท็บ Actions > **Sync queue and DB (no AI)** > Run workflow ด้วย `mode = dry-run` (อ่านแท็บชีตเก่า ไม่เขียนอะไร) แล้วค่อย `mode = sync` `db` (เปิดเป็นค่าเริ่มต้น) รันส่วน 1 ของขั้น `db` ต่อ ทำให้ DB_DWR / DB_DRQ ตรงกับคิว, `overwrite` สร้างใหม่ทั้งคิวแทนการ sync (รันตามเวลาอย่าเปิดตัวนี้) ถ้าใช้บรรทัดคำสั่ง: `gh workflow run sync-no-ai.yml -f mode=dry-run`
 
-วิธีแก้แถวใน DB และให้ AI อ่าน PDF ที่รออยู่: แท็บ Actions > **Sync DB (with AI)** > Run workflow แล้วเลือก `mode` เริ่มจาก `dry-run` ตามด้วย `check-access` แล้ว `run` ด้วย `limit` น้อยๆ ก่อนค่อยเพิ่ม ถ้าใส่ `only_rows` จะทำเฉพาะ AI ของแถวนั้น ถ้าใช้บรรทัดคำสั่ง: `gh workflow run migrate.yml -f mode=dry-run`
+วิธีแก้แถวใน DB และให้ AI อ่าน PDF ที่รออยู่: แท็บ Actions > **Sync DB (with AI)** > Run workflow แล้วเลือก `mode` เริ่มจาก `dry-run` ตามด้วย `check-access` แล้ว `sync` ด้วย `limit` น้อยๆ ก่อนค่อยเพิ่ม ถ้าใส่ `only_rows` จะทำเฉพาะ AI ของแถวนั้น `allow_large_removal` ปลดเพดานตัวกันพลาดของส่วน 1 ถ้าใช้บรรทัดคำสั่ง: `gh workflow run sync-db.yml -f mode=dry-run`
 
 - unit test (job `test` รวมถึงตัวเช็ก workflow เอง) จะรันก่อน ผ่านแล้ว sync ถึงจะเริ่ม
 - ไม่มีสองรอบรันซ้อนกัน ไม่ว่าจะเป็น workflow ไหน (ทั้งสามตัวใช้ `concurrency` กลุ่มเดียวกัน) จึงไม่ทำแถว `Waiting` เดียวกันซ้ำ
 - คีย์ service account ถูกเขียนเป็นไฟล์ชั่วคราวเฉพาะช่วงที่รัน
 - workflow เรียกสคริปต์ด้วย `--public-log`: log และสรุปผลการรันแสดงแค่ตัวเลข (สถานะคิว, ยอด Done/Error, สาเหตุที่หยุด) ไม่มีชื่อแท็บ ชื่อ/ID ชีต Doc No file ID หรือรายละเอียด error และซ่อน ID สเปรดชีตกับอีเมล service account อีกชั้น สิ่งที่สคริปต์เขียนลง stderr ไปอยู่ในไฟล์ที่ไม่เคยถูกพิมพ์ รายละเอียดรายแถวดูได้ที่คอลัมน์ G ของชีตคิว ถ้าต้องการ log เต็มให้รันในเครื่อง (ไม่ใส่ `--public-log`)
-- workflow ไม่มี `schedule:` (cron ของ GitHub เองไม่เริ่มรันให้) ถ้าจะรันอัตโนมัติ ให้เรียก workflow_dispatch API จากตัวตั้งเวลาภายนอก เช่น cron-job.org: `POST https://api.github.com/repos/<owner>/<repo>/actions/workflows/sync.yml/dispatches` (หรือ `extract.yml` / `migrate.yml`) ด้วย body `{"ref":"main","inputs":{"mode":"sync","limit":"30"}}` (`extract.yml`: `{"ref":"main","inputs":{"mode":"extract"}}`, `migrate.yml`: `{"ref":"main","inputs":{"mode":"run","limit":"30"}}`) และ token แบบ fine-grained สิทธิ์ **Actions: Read and write** ชื่อไฟล์ ค่าของ `mode` และ input อื่นของ `extract.yml` กับ `migrate.yml` เหมือนตอนที่ยังชื่อ "Extract queue" และ "Migrate queue" การเรียกที่มีอยู่แล้วจึงยังใช้ได้ (`migrate.yml` เดิมรันเฉพาะ AI ตอนนี้รัน `sync db` ซึ่งส่วน 1 แก้แถวใน DB ด้วย)
+- workflow ไม่มี `schedule:` (cron ของ GitHub เองไม่เริ่มรันให้) ถ้าจะรันอัตโนมัติ ให้เรียก workflow_dispatch API จากตัวตั้งเวลาภายนอก เช่น cron-job.org: `POST https://api.github.com/repos/<owner>/<repo>/actions/workflows/sync.yml/dispatches` (หรือ `sync-no-ai.yml` / `sync-db.yml`) ด้วย body `{"ref":"main","inputs":{"mode":"sync","limit":"30"}}` (`sync-no-ai.yml`: `{"ref":"main","inputs":{"mode":"sync"}}`, `sync-db.yml`: `{"ref":"main","inputs":{"mode":"sync","limit":"30"}}`) และ token แบบ fine-grained สิทธิ์ **Actions: Read and write** ในทั้งสามตัว `mode = sync` แปลว่ารันจริง สองตัวหลังเคยชื่อ "Extract queue" และ "Migrate queue" (`extract.yml` และ `migrate.yml` ที่ใช้ `mode = extract` / `run` และ input `sync_db`) ก่อนปรับระบบ sync: การเรียกที่ยังใช้ชื่อไฟล์หรือค่าเก่าจะล้มเหลว (ไฟล์เก่าถูกลบแล้ว) จึงต้องแก้ตามนี้
 - ส่วนที่ใช้ร่วมกันอยู่ใน `.github/scripts/` (`with_credentials.sh` เขียนคีย์เป็นไฟล์ชั่วคราวแล้วลบทิ้ง, `job_summary.sh`) และ `.github/actions/setup-python-deps/`
 
 ## พฤติกรรมที่ควรรู้

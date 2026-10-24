@@ -3,7 +3,7 @@
 #   2. db      queue -> DB (DB_DWR / DB_DRQ). Part 1 (no AI): remove the DB rows that left the legacy sheet (copied to a _REMOVED_<tab> tab first), update C/P and Folder Link, set the
 #              Legacy sync tag (Synced / Outdated). Part 2: the AI (Gemini) reads the PDFs of the Waiting rows, up to `limit` rows per queue
 # A queue that failed or was refused in the queue step is left out of the db step; a part that fails does not stop the other one, but the run ends with an error.
-# The same work is available in pieces: extract.yml (`sync queue db --no-ai`, no AI call) and migrate.yml (`sync db`, and `check access`).
+# The same work is available in pieces: sync-no-ai.yml (`sync queue db --no-ai`, no AI call) and sync-db.yml (`sync db`, and `check access`).
 # With mode = dry-run nothing is written and nothing is sent to Gemini: the db step shows its plan on the queue the queue step planned.
 #
 # Required repository secrets (Settings > Secrets and variables > Actions > Secrets):
@@ -19,8 +19,8 @@
 #
 # Start with mode = dry-run, then run with mode = sync and a small limit.
 # Safety net: a run that would remove more rows than the limit (the larger of 10% of the rows and 100) from the queue or a DB is refused; allow_large_removal lifts it.
-# Not offered here (use extract.yml / migrate.yml): overwrite (rebuild a queue from scratch), only_rows, accept_first_report, max_output_tokens, check-access, a run without the AI.
-# The log shows counts only (--public-log); the details are in column G of the queue sheet. There is no `schedule:` (see migrate.yml): call the workflow_dispatch API
+# Not offered here (use sync-no-ai.yml / sync-db.yml): overwrite (rebuild a queue from scratch), only_rows, accept_first_report, max_output_tokens, check-access, a run without the AI.
+# The log shows counts only (--public-log); the details are in column G of the queue sheet. There is no `schedule:`: GitHub's own cron was not starting runs for this repository, so call the workflow_dispatch API
 # from an outside scheduler such as cron-job.org with the body {"ref":"main","inputs":{"mode":"sync","limit":"30"}}.
 name: Sync all
 
@@ -50,7 +50,7 @@ on:
         type: boolean
         default: false
 
-# Same group as extract.yml and migrate.yml: two syncs never run at the same time
+# Same group as sync-no-ai.yml and sync-db.yml: two syncs never run at the same time
 concurrency:
   group: pmis-sync
   cancel-in-progress: false

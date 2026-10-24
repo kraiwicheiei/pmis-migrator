@@ -176,7 +176,7 @@ python pmis.py sync queue --queue drq   # 한 큐만 (그 큐의 탭 이름 변�
   - PDF 가 큐에 더 이상 없는 DB 행을 **삭제**합니다. **Status 가 `AI Migrated` 이고 표시가 `Synced` 또는 `Outdated` 인 행만** 지웁니다. 즉 옛 시트에서 왔다가 사라진 행입니다(사람이 직접 넣은 행, 그리고 옛 시트에서 온 적이 없는 행, 예를 들어 다른 시스템이 넣은 문서는 절대 지우지 않음). H열에서 교체를 기다리는 PDF 의 행은 남깁니다. **지우기 전에 행을 `_REMOVED_DB_DWR` / `_REMOVED_DB_DRQ` 탭에 복사**하므로(시각, 탭, 원래 행 번호, 이유, 원래 셀 전부. 탭이 없으면 만듦) 아무것도 잃지 않습니다.
   쓰기 직전에 PDF 열을 다시 읽어, 그사이 행이 끼어들거나 사라졌으면 아무것도 바꾸지 않고 중단합니다. 바뀐 것이 없으면 두 번째 실행은 아무것도 쓰지 않습니다.
 - **안전장치:** 큐에 행이 없거나 지울 행이 한도(DB 행의 10% 와 100 중 큰 값)를 넘으면 그 DB 에는 아무것도 쓰지 않습니다(`--allow-large-removal` 로 해제, `--dry-run` 은 이 때문에 실패하지 않음). 행이 실제로 삭제되므로 위치로 DB 행을 참조하는 다른 시트는 밀릴 수 있습니다. 먼저 `--dry-run` 으로 계획을 확인하세요.
-- **GitHub Actions 에서:** "GitHub Actions 에서 실행" 참고: **Sync all** 은 전체 흐름을 실행하고, **Sync queue and DB (no AI)** 는 `sync queue db --no-ai` 를 실행하며(`db` 단계는 `sync_db` 입력이며 기본 켜짐) **Sync DB (with AI)** 는 `sync db` 를 실행합니다. 먼저 `mode = dry-run` 으로 실행하세요. 로그에는 집계 숫자만 나옵니다.
+- **GitHub Actions 에서:** "GitHub Actions 에서 실행" 참고: **Sync all** 은 전체 흐름을 실행하고, **Sync queue and DB (no AI)** 는 `sync queue db --no-ai` 를 실행하며(`db` 단계는 `db` 입력이며 기본 켜짐) **Sync DB (with AI)** 는 `sync db` 를 실행합니다. 먼저 `mode = dry-run` 으로 실행하세요. 로그에는 집계 숫자만 나옵니다.
 - **`Legacy sync` 표시:** C/P 열 바로 뒤의 열(**`DB_DWR` 은 `U`, `DB_DRQ` 는 `T`**, 머리글 `Legacy sync`)이 DB 행이 옛 시트와 맞는지 알려 줍니다:
 
   | 표시 | 의미 |
@@ -215,8 +215,8 @@ workflow 세 개가 같은 스크립트를 GitHub 호스팅 러너에서 실행�
 | workflow (Actions 탭) | 파일 | 실행하는 것 | 필요한 것 |
 |---|---|---|---|
 | **Sync all** | `.github/workflows/sync.yml` | `python pmis.py sync` (queue -> db, AI 포함) | `GEMINI_API_KEY`, 옛 시트 변수 |
-| **Sync queue and DB (no AI)** | `.github/workflows/extract.yml` | `python pmis.py sync queue db --no-ai` (Gemini 호출 없음) | 옛 시트 변수 |
-| **Sync DB (with AI)** | `.github/workflows/migrate.yml` | `python pmis.py sync db` (1부, 이어서 AI), 또는 `check access` | `GEMINI_API_KEY` |
+| **Sync queue and DB (no AI)** | `.github/workflows/sync-no-ai.yml` | `python pmis.py sync queue db --no-ai` (Gemini 호출 없음) | 옛 시트 변수 |
+| **Sync DB (with AI)** | `.github/workflows/sync-db.yml` | `python pmis.py sync db` (1부, 이어서 AI), 또는 `check access` | `GEMINI_API_KEY` |
 
 GitHub Free 플랜의 private 저장소는 매달 Actions 2,000분을 받습니다.
 
@@ -236,15 +236,15 @@ gh variable set PMIS_SPREADSHEET_ID --body "<스프레드시트 ID>"            
 
 전체 맞추기: Actions 탭 > **Sync all** > Run workflow 에서 먼저 `mode = dry-run`(두 단계의 계획을 보여 주고 아무것도 쓰지 않음), 그다음 작은 `limit` 으로 `mode = sync`. `queue` 는 DWR / DRQ / 둘 다, `legacy_spreadsheet` 는 다른 파일 지정, `allow_large_removal` 은 안전 한도를 풉니다. 명령줄에서는 `gh workflow run sync.yml -f mode=dry-run`.
 
-큐를 맞추고 AI 없이 DB 행만 고치기: Actions 탭 > **Sync queue and DB (no AI)** > Run workflow 에서 먼저 `mode = dry-run`(옛 탭을 읽고 아무것도 쓰지 않음), 그다음 `mode = extract`(이 값은 기존 호출이 계속 동작하도록 옛 이름을 유지). `sync_db`(기본 켜짐)는 `db` 단계의 1부도 실행해 DB_DWR / DB_DRQ 를 큐에 맞추고, `overwrite` 는 맞추지 않고 처음부터 다시 만듭니다(예약 실행에서는 끄세요). 명령줄에서는 `gh workflow run extract.yml -f mode=dry-run`.
+큐를 맞추고 AI 없이 DB 행만 고치기: Actions 탭 > **Sync queue and DB (no AI)** > Run workflow 에서 먼저 `mode = dry-run`(옛 탭을 읽고 아무것도 쓰지 않음), 그다음 `mode = sync`. `db`(기본 켜짐)는 `db` 단계의 1부도 실행해 DB_DWR / DB_DRQ 를 큐에 맞추고, `overwrite` 는 맞추지 않고 처음부터 다시 만듭니다(예약 실행에서는 끄세요). 명령줄에서는 `gh workflow run sync-no-ai.yml -f mode=dry-run`.
 
-DB 행을 고치고 AI 가 대기 중인 PDF 를 읽게 하기: Actions 탭 > **Sync DB (with AI)** > Run workflow 에서 `mode` 를 고릅니다. 먼저 `dry-run`, 다음 `check-access`, 그다음 작은 `limit` 으로 `run`, 이어서 더 크게. `only_rows` 를 주면 그 행에 대해 AI 만 실행됩니다. 명령줄에서는 `gh workflow run migrate.yml -f mode=dry-run`.
+DB 행을 고치고 AI 가 대기 중인 PDF 를 읽게 하기: Actions 탭 > **Sync DB (with AI)** > Run workflow 에서 `mode` 를 고릅니다. 먼저 `dry-run`, 다음 `check-access`, 그다음 작은 `limit` 으로 `sync`, 이어서 더 크게. `only_rows` 를 주면 그 행에 대해 AI 만 실행되고, `allow_large_removal` 은 1부의 안전 한도를 풉니다. 명령줄에서는 `gh workflow run sync-db.yml -f mode=dry-run`.
 
 - 단위 테스트(`test` 잡. workflow 자체를 확인하는 테스트 포함)가 먼저 실행되며, 통과해야 sync 가 시작됩니다.
 - 어느 workflow 든 두 실행이 겹치지 않으며(셋 모두 같은 `concurrency` 그룹) 같은 `Waiting` 행이 두 번 처리되지 않습니다.
 - 서비스 계정 키는 실행 중에만 임시 파일로 존재합니다.
 - workflow 는 스크립트를 `--public-log` 로 호출합니다: 로그와 실행 요약에는 집계(큐 상태, Done/Error 합계, 중단 사유)만 나오고 탭 이름, 시트 이름/ID, Doc No, file ID, 오류 상세는 나오지 않으며 스프레드시트 ID 와 서비스 계정 이메일도 한 번 더 가려집니다. 스크립트가 stderr 로 쓰는 내용은 출력되지 않는 파일로 갑니다. 행별 상세는 큐 시트의 G열에 있고, 전체 로그가 필요하면 로컬에서(`--public-log` 없이) 실행하세요.
-- workflow 에는 `schedule:` 이 없습니다(GitHub 자체 cron 이 실행을 시작해 주지 않았음). 자동으로 돌리려면 cron-job.org 같은 외부 스케줄러에서 workflow_dispatch API 를 호출하세요: `POST https://api.github.com/repos/<owner>/<repo>/actions/workflows/sync.yml/dispatches`(또는 `extract.yml` / `migrate.yml`), body 는 `{"ref":"main","inputs":{"mode":"sync","limit":"30"}}`(`extract.yml`: `{"ref":"main","inputs":{"mode":"extract"}}`, `migrate.yml`: `{"ref":"main","inputs":{"mode":"run","limit":"30"}}`), 토큰은 **Actions: Read and write** 권한의 fine-grained 토큰. `extract.yml` 과 `migrate.yml` 의 파일 이름, `mode` 값, 다른 입력은 "Extract queue" / "Migrate queue" 라고 부르던 때와 같으므로 이미 있는 호출은 계속 동작합니다. (`migrate.yml` 은 예전에는 AI 만 실행했지만 지금은 `sync db` 를 실행하며, 그 1부가 DB 행도 고칩니다.)
+- workflow 에는 `schedule:` 이 없습니다(GitHub 자체 cron 이 실행을 시작해 주지 않았음). 자동으로 돌리려면 cron-job.org 같은 외부 스케줄러에서 workflow_dispatch API 를 호출하세요: `POST https://api.github.com/repos/<owner>/<repo>/actions/workflows/sync.yml/dispatches`(또는 `sync-no-ai.yml` / `sync-db.yml`), body 는 `{"ref":"main","inputs":{"mode":"sync","limit":"30"}}`(`sync-no-ai.yml`: `{"ref":"main","inputs":{"mode":"sync"}}`, `sync-db.yml`: `{"ref":"main","inputs":{"mode":"sync","limit":"30"}}`), 토큰은 **Actions: Read and write** 권한의 fine-grained 토큰. 세 workflow 모두 `mode = sync` 는 실제 실행을 뜻합니다. 뒤의 둘은 sync 를 고치기 전에는 "Extract queue" / "Migrate queue"(`extract.yml` 과 `migrate.yml`. `mode = extract` / `run` 과 입력 `sync_db`)였습니다: 옛 파일 이름이나 값을 그대로 쓰는 호출은 실패하므로(옛 파일은 삭제됨) 바꿔 주세요.
 - 공용 부분은 `.github/scripts/`(`with_credentials.sh` 는 키를 임시 파일에 쓰고 끝나면 삭제, `job_summary.sh`)와 `.github/actions/setup-python-deps/` 에 있습니다.
 
 ## 알아둘 점

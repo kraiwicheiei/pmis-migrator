@@ -16,7 +16,7 @@ from migrator.cli import build_parser
 yaml = pytest.importorskip("yaml")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WORKFLOWS = ("extract.yml", "migrate.yml", "sync.yml")
+WORKFLOWS = ("sync-no-ai.yml", "sync-db.yml", "sync.yml")
 LEGACY_URL = "https://docs.google.com/spreadsheets/d/LEGACYFILEID123/edit#gid=0"
 
 
@@ -91,16 +91,24 @@ def test_nothing_in_github_calls_the_old_entry_point():
             assert "--extract" not in text and "--sync-db" not in text and "--check-access" not in text and "--backfill-cp" not in text, os.path.join(folder, name)
 
 
-def test_the_inputs_that_existing_calls_send_are_still_accepted():
-    # cron-job.org calls the API with these inputs (the file names and the choice values must not change)
-    extract = load("extract.yml")[True]["workflow_dispatch"]["inputs"]
-    migrate = load("migrate.yml")[True]["workflow_dispatch"]["inputs"]
-    assert extract["mode"]["options"] == ["dry-run", "extract"] and migrate["mode"]["options"] == ["dry-run", "check-access", "run"]
-    for inputs in (extract, migrate):
-        assert inputs["queue"]["options"] == ["both", "dwr", "drq"]
-    assert {"legacy_spreadsheet", "overwrite", "sync_db", "allow_large_removal"} <= set(extract)
-    assert {"limit", "only_rows", "accept_first_report", "max_output_tokens"} <= set(migrate)
-    assert load("sync.yml")[True]["workflow_dispatch"]["inputs"]["mode"]["options"] == ["dry-run", "sync"]
+def test_the_inputs_of_the_workflows():
+    # cron-job.org calls the API with these file names and inputs: change them only together with the calls
+    no_ai = load("sync-no-ai.yml")[True]["workflow_dispatch"]["inputs"]
+    sync_db = load("sync-db.yml")[True]["workflow_dispatch"]["inputs"]
+    sync_all = load("sync.yml")[True]["workflow_dispatch"]["inputs"]
+    assert no_ai["mode"]["options"] == ["dry-run", "sync"] and sync_all["mode"]["options"] == ["dry-run", "sync"]       # "sync" = for real, in every workflow
+    assert sync_db["mode"]["options"] == ["dry-run", "check-access", "sync"]
+    for inputs in (no_ai, sync_db, sync_all):
+        assert inputs["queue"]["options"] == ["both", "dwr", "drq"] and inputs["allow_large_removal"]["default"] is False
+    assert {"legacy_spreadsheet", "overwrite", "db"} <= set(no_ai) and no_ai["db"]["default"] is True
+    assert {"limit", "only_rows", "accept_first_report", "max_output_tokens"} <= set(sync_db)
+    assert {"limit", "legacy_spreadsheet"} <= set(sync_all)
+
+
+def test_the_old_workflow_files_are_gone():
+    # extract.yml and migrate.yml were renamed (sync-no-ai.yml, sync-db.yml); a copy left behind would run beside the new ones
+    for name in ("extract.yml", "migrate.yml"):
+        assert not os.path.exists(os.path.join(ROOT, ".github", "workflows", name)), name
 
 
 # --- 각 workflow 가 만드는 명령 / the command each workflow builds / คำสั่งที่แต่ละ workflow สร้าง ---
@@ -109,18 +117,20 @@ needs_bash = pytest.mark.skipif(BASH is None, reason="needs bash (Git Bash on Wi
 
 @needs_bash
 @pytest.mark.parametrize("workflow, inputs, expected", [
-    ("extract.yml", dict(mode="dry-run", queue="both", sync_db="true", overwrite="false", allow_large_removal="false", legacy_spreadsheet=""),
+    ("sync-no-ai.yml", dict(mode="dry-run", queue="both", db="true", overwrite="false", allow_large_removal="false", legacy_spreadsheet=""),
      ["sync", "queue", "db", "--no-ai", "--public-log", "--dry-run"]),
-    ("extract.yml", dict(mode="extract", queue="drq", sync_db="false", overwrite="false", allow_large_removal="false", legacy_spreadsheet=""),
+    ("sync-no-ai.yml", dict(mode="sync", queue="drq", db="false", overwrite="false", allow_large_removal="false", legacy_spreadsheet=""),
      ["sync", "queue", "--no-ai", "--public-log", "--queue", "drq"]),
-    ("extract.yml", dict(mode="extract", queue="both", sync_db="", overwrite="true", allow_large_removal="true", legacy_spreadsheet=LEGACY_URL),
+    ("sync-no-ai.yml", dict(mode="sync", queue="both", db="", overwrite="true", allow_large_removal="true", legacy_spreadsheet=LEGACY_URL),
      ["sync", "queue", "db", "--no-ai", "--public-log", "--overwrite", "--allow-large-removal", "--legacy-spreadsheet", LEGACY_URL]),
-    ("migrate.yml", dict(mode="dry-run", queue="both", limit="30", only_rows="", accept_first="false", max_tokens=""),
+    ("sync-db.yml", dict(mode="dry-run", queue="both", limit="30", only_rows="", accept_first="false", max_tokens="", allow_large_removal="false"),
      ["sync", "db", "--public-log", "--dry-run", "--limit", "30"]),
-    ("migrate.yml", dict(mode="check-access", queue="dwr", limit="0", only_rows="", accept_first="false", max_tokens=""),
+    ("sync-db.yml", dict(mode="check-access", queue="dwr", limit="0", only_rows="", accept_first="false", max_tokens="", allow_large_removal="false"),
      ["check", "access", "--public-log", "--queue", "dwr", "--limit", "0"]),
-    ("migrate.yml", dict(mode="run", queue="dwr", limit="200", only_rows="83,102,127-128", accept_first="true", max_tokens="16000"),
+    ("sync-db.yml", dict(mode="sync", queue="dwr", limit="200", only_rows="83,102,127-128", accept_first="true", max_tokens="16000", allow_large_removal="false"),
      ["sync", "db", "--public-log", "--queue", "dwr", "--limit", "200", "--only-rows", "83,102,127-128", "--max-output-tokens", "16000", "--accept-first-report"]),
+    ("sync-db.yml", dict(mode="sync", queue="both", limit="30", only_rows="", accept_first="false", max_tokens="", allow_large_removal="true"),
+     ["sync", "db", "--public-log", "--limit", "30", "--allow-large-removal"]),
     ("sync.yml", dict(mode="dry-run", queue="both", limit="30", legacy_spreadsheet="", allow_large_removal="false"),
      ["sync", "--public-log", "--dry-run", "--limit", "30"]),
     ("sync.yml", dict(mode="sync", queue="drq", limit="0", legacy_spreadsheet=LEGACY_URL, allow_large_removal="true"),
@@ -135,19 +145,24 @@ def test_each_workflow_builds_a_command_the_cli_accepts(tmp_path, workflow, inpu
 @needs_bash
 def test_the_workflows_refuse_what_the_script_would_refuse_before_calling_it(tmp_path):
     # only_rows with both queues, an unknown mode, a missing Gemini key for a real run, a missing legacy tab name
-    status, args, error = run_step(tmp_path, "migrate.yml", mode="run", queue="both", limit="30", only_rows="5", accept_first="false", max_tokens="")
+    db = dict(limit="30", only_rows="", accept_first="false", max_tokens="", allow_large_removal="false")
+    status, args, error = run_step(tmp_path, "sync-db.yml", mode="sync", queue="both", **dict(db, only_rows="5"))
     assert status == 1 and args == [] and "only_rows needs queue = dwr or drq" in error
-    status, args, error = run_step(tmp_path, "migrate.yml", mode="bogus", queue="both", limit="30", only_rows="", accept_first="false", max_tokens="")
+    status, args, error = run_step(tmp_path, "sync-db.yml", mode="bogus", queue="both", **db)
     assert status == 1 and "Unknown mode: bogus" in error
+    status, args, error = run_step(tmp_path, "sync-db.yml", mode="check-access", queue="both", **dict(db, allow_large_removal="true"))
+    assert status == 1 and args == [] and "allow_large_removal does not apply to mode = check-access" in error      # `check access` has no such option
+    for old_mode in ("run", "extract"):                                                                              # the old mode names are refused, not silently ignored
+        assert "Unknown mode" in run_step(tmp_path, "sync-db.yml", mode=old_mode, queue="both", **db)[2]
     sync = dict(queue="both", limit="30", legacy_spreadsheet="", allow_large_removal="false")
     status, args, error = run_step(tmp_path, "sync.yml", env_over={"GEMINI_API_KEY": ""}, mode="sync", **sync)
     assert status == 1 and args == [] and "GEMINI_API_KEY is missing or empty (needed for mode = sync)" in error
     assert run_step(tmp_path, "sync.yml", env_over={"GEMINI_API_KEY": ""}, mode="dry-run", **sync)[0] == 0           # a dry run needs no Gemini key
-    status, args, error = run_step(tmp_path, "migrate.yml", env_over={"GEMINI_API_KEY": ""}, mode="run", queue="dwr", limit="30", only_rows="", accept_first="false", max_tokens="")
-    assert status == 1 and "GEMINI_API_KEY is missing or empty (needed for mode = run)" in error
+    status, args, error = run_step(tmp_path, "sync-db.yml", env_over={"GEMINI_API_KEY": ""}, mode="sync", queue="dwr", **db)
+    assert status == 1 and "GEMINI_API_KEY is missing or empty (needed for mode = sync)" in error
     status, args, error = run_step(tmp_path, "sync.yml", env_over={"PMIS_LEGACY_DWR_SHEET": ""}, mode="dry-run", **sync)
     assert status == 1 and "PMIS_LEGACY_DWR_SHEET is missing or empty" in error
     assert run_step(tmp_path, "sync.yml", env_over={"PMIS_LEGACY_DWR_SHEET": ""}, mode="dry-run", **dict(sync, queue="drq"))[0] == 0   # only the DRQ tab is needed for the DRQ queue
-    status, args, error = run_step(tmp_path, "extract.yml", env_over={"PMIS_SPREADSHEET_ID": ""}, mode="dry-run", queue="both", sync_db="true", overwrite="false",
+    status, args, error = run_step(tmp_path, "sync-no-ai.yml", env_over={"PMIS_SPREADSHEET_ID": ""}, mode="dry-run", queue="both", db="true", overwrite="false",
                                    allow_large_removal="false", legacy_spreadsheet="")
     assert status == 1 and "PMIS_SPREADSHEET_ID is missing or empty" in error
