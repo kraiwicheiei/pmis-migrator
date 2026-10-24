@@ -17,7 +17,7 @@ from .queue_writer import QUEUE_HEADER, plan_sync, queue_progress, sync_queue, w
 from .sheets import SheetsError, list_tabs, read_values, sheets_call, spreadsheet_title
 from .specs import SPECS
 from .stamps import REFRESH_COL, time_stamp, write_refresh_time
-from .utils import removal_limit
+from .utils import count_lines, removal_limit
 
 
 @dataclass
@@ -145,22 +145,26 @@ def extract_queue(args: argparse.Namespace, clients: Clients, key: str, log: Cal
                 f"(the DB row that used the old file is replaced when it succeeds)")
         if plan.removed_processed:
             log(f"  ⚠ {plan.removed_processed} removed rows were Done / Error: they have no item in the legacy sheet any more")
-        counts = (f"{plan.matched} kept ({plan.updated} changed, {plan.renumbered} renumbered, {plan.relinked} set back to Waiting), +{plan.new} new, "
-                  f"{plan.duplicates} duplicate rows merged, {plan.removed} rows not in the legacy sheet any more removed; "
-                  f"statuses kept: Done {plan.kept['done']}, Error {plan.kept['error']}, Waiting {plan.kept['waiting']}"
-                  + (f", other {plan.kept['other']}" if plan.kept["other"] else "") + f" | {len(plan.rows)} rows")
+        counts = count_lines([
+            ("Kept from the queue", str(plan.matched), f"(changed {plan.updated}, renumbered {plan.renumbered}, set back to Waiting {plan.relinked})"),
+            ("New", str(plan.new), ""),
+            ("Duplicate rows merged", str(plan.duplicates), ""),
+            ("Removed (not in the legacy sheet)", str(plan.removed), ""),
+            ("Statuses kept", f"Done {plan.kept['done']}, Error {plan.kept['error']}, Waiting {plan.kept['waiting']}"
+                              + (f", other {plan.kept['other']}" if plan.kept["other"] else ""), ""),
+        ])
         if args.dry_run:
             for number, old, new in plan.renumbered_samples[:5]:
                 log(f"  sample (renumbered): row {number}: {old} -> {new}")
-            log(f"  (--dry-run) nothing was written: would sync {spec.queue_tab}: {counts}" + ("" if plan.changed else " - no change"))
+            log(f"  (--dry-run) nothing was written: would sync {spec.queue_tab}: {len(plan.rows)} rows" + ("" if plan.changed else " - no change") + f"\n{counts}")
             return summary
         if plan.changed:
             sheet_id, grid_rows = tabs[spec.queue_tab]
             sync_queue(sess, sid, spec.queue_tab, sheet_id, grid_rows, plan)
             summary.written = len(plan.rows)
-            log(f"  ✓ Synced {spec.queue_tab}: {counts}")
+            log(f"  ✓ Synced {spec.queue_tab}: {len(plan.rows)} rows\n{counts}")
         else:
-            log(f"  ✓ Synced {spec.queue_tab}: no change ({counts})")
+            log(f"  ✓ Synced {spec.queue_tab}: no change ({len(plan.rows)} rows)\n{counts}")
     # 행은 이미 기록됐으므로 시각을 쓰지 못해도(예: 탭의 열이 7개뿐) extract 자체는 실패로 보지 않음
     # [TH] แถวถูกเขียนไปแล้ว ถ้าเขียนเวลาไม่ได้ (เช่นแท็บมีแค่ 7 คอลัมน์) ก็ไม่นับว่า extract ล้มเหลว
     # [EN] The rows are already written, so if the time cannot be written (e.g. the tab has only 7 columns) the extract itself is not treated as failed

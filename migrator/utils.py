@@ -83,6 +83,20 @@ def col_letter(n: int) -> str:
     return s
 
 
+COUNT_LEADER = "·"
+
+
+def count_lines(rows: list[tuple[str, str, str]], indent: str = "    ") -> str:
+    """
+    "이름 ····· 값  (설명)" 꼴로 값 열을 맞춘 줄들 (한 줄에 개수를 길게 늘어놓는 대신). 공개 로그도 이 줄들을 통과시킴 (개수와 고정 문구만 들어 있음)
+    [TH] บรรทัดที่จัดคอลัมน์ค่าให้ตรงกันในรูป "ชื่อ ····· ค่า  (คำอธิบาย)" (แทนการเรียงตัวเลขยาว ๆ ในบรรทัดเดียว) log สาธารณะก็ปล่อยบรรทัดเหล่านี้ผ่าน (มีแต่ตัวเลขและข้อความคงที่)
+    [EN] Lines in the form "label ····· value  (note)" with the value column aligned (instead of a long run of counts on one line).
+         The public log lets these lines through (they hold only counts and fixed wording)
+    """
+    width = max(len(label) for label, _, _ in rows) + 4
+    return "\n".join(f"{indent}{label} {COUNT_LEADER * (width - len(label) - 1)} {value}" + (f"  {note}" if note else "") for label, value, note in rows)
+
+
 def removal_limit(total: int) -> int:
     """
     한 번에 지울 수 있는 최대 행 수: 전체 행의 10% 와 100 중 큰 값

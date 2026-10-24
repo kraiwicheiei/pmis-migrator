@@ -16,7 +16,7 @@ from migrator.queue_writer import QUEUE_HEADER, clear_replaces, plan_sync, statu
 from migrator.sheets import SheetsError
 from migrator.stamps import QUEUE_REFRESH_LABEL, REFRESH_COL
 
-from tests.fakes import FID, NON_ENGLISH, URL, qrow
+from tests.fakes import FID, NON_ENGLISH, URL, count_rows, qrow
 from tests.memory_sheets import MemorySheets
 from tests.legacy_fakes import DRQ_ROWS, DWR_ROWS, FakeLegacy, LEGACY_FILE, LEGACY_HEADER, STAMP, core, extract_logs, legacy_grid, merge_queue, mk, txt, xargs
 
@@ -67,8 +67,9 @@ def test_extract_recomputes_a_queue_in_progress_and_keeps_the_status_of_the_exis
     assert (summary.added, summary.updated, summary.unchanged, summary.kept_done, summary.removed, summary.relinked, summary.written) == (1, 2, 1, 0, 1, 1, 4)
     assert any("1 Done rows got a new PDF link from the legacy sheet: set back to Waiting" in m for m in logs)
     assert any("1 removed rows were Done / Error" in m for m in logs)
-    assert any("Synced MIGRATION_QUEUE: 3 kept (2 changed, 0 renumbered, 1 set back to Waiting), +1 new, 0 duplicate rows merged, 1 rows not in the legacy sheet any more removed; "
-               "statuses kept: Done 0, Error 1, Waiting 2 | 4 rows" in m for m in logs)
+    assert any("Synced MIGRATION_QUEUE: 4 rows" in m for m in logs)
+    assert count_rows(logs) == {"Kept from the queue": "3  (changed 2, renumbered 0, set back to Waiting 1)", "New": "1", "Duplicate rows merged": "0",
+                                "Removed (not in the legacy sheet)": "1", "Statuses kept": "Done 0, Error 1, Waiting 2"}
 
 
 def test_a_second_sync_changes_nothing_but_the_refresh_time():
@@ -79,7 +80,8 @@ def test_a_second_sync_changes_nothing_but_the_refresh_time():
     summary, logs = extract_logs(w)
     assert w.queues["MIGRATION_QUEUE"] == after_first
     assert [e[0] for e in w.events] == ["refreshed"] and (summary.added, summary.updated, summary.written) == (0, 0, 0)
-    assert any("Synced MIGRATION_QUEUE: no change (4 kept (0 changed, 0 renumbered, 0 set back to Waiting)" in m for m in logs)
+    assert any("Synced MIGRATION_QUEUE: no change (4 rows)" in m for m in logs)
+    assert count_rows(logs)["Kept from the queue"] == "4  (changed 0, renumbered 0, set back to Waiting 0)" and count_rows(logs)["New"] == "0"
 
 
 def test_extract_sync_dry_run_reports_the_plan_and_writes_nothing():
@@ -88,7 +90,8 @@ def test_extract_sync_dry_run_reports_the_plan_and_writes_nothing():
     summary, logs = extract_logs(w, dry_run=True)
     assert w.events == [] and w.queues["MIGRATION_QUEUE"] == existing and w.refresh == {}
     assert (summary.added, summary.updated, summary.removed, summary.written) == (1, 2, 1, 0)
-    assert any("(--dry-run) nothing was written: would sync MIGRATION_QUEUE: 3 kept (2 changed" in m and "+1 new" in m for m in logs)
+    assert any("(--dry-run) nothing was written: would sync MIGRATION_QUEUE: 4 rows" in m for m in logs)
+    assert count_rows(logs)["Kept from the queue"].startswith("3  (changed 2") and count_rows(logs)["New"] == "1"
 
 
 def test_extract_overwrite_rebuilds_the_queue_and_wipes_the_statuses():
@@ -269,7 +272,7 @@ def test_a_changed_no_in_the_legacy_sheet_renames_the_doc_no_of_the_same_items()
     assert len(queue) == 5 and [r[6] for r in queue[1:]] == ["Waiting", "Error: Drive Access | x", "Waiting", "Waiting"]       # no duplicate row; only the relinked Done row went back to Waiting
     assert queue[1][3] == URL(2) and queue[1][7] == FID(99)                                # its PDF is recomputed; the old file ID waits in H
     assert summary.renumbered == 3 and summary.added == 0 and summary.removed == 0 and summary.relinked == 1
-    assert any("3 renumbered" in m for m in logs) and any("1 Done rows got a new PDF link" in m for m in logs)
+    assert "renumbered 3" in count_rows(logs)["Kept from the queue"] and any("1 Done rows got a new PDF link" in m for m in logs)
     again, _ = extract_logs(w)                                                             # nothing left to rename
     assert again.renumbered == 0 and again.added == 0 and again.relinked == 0 and [r[0] for r in queue[1:]][0] == "R-777-CIV-001"
 
@@ -289,7 +292,7 @@ def test_renumber_dry_run_reports_the_plan_and_writes_nothing():
     summary, logs = extract_logs(w, dry_run=True)
     assert w.queues["MIGRATION_QUEUE"] == before and w.events == [] and summary.renumbered == 3
     assert any("sample (renumbered): row 2: R-001-CIV-001 -> R-777-CIV-001" in m for m in logs)
-    assert any("would sync MIGRATION_QUEUE" in m and "3 renumbered" in m for m in logs)
+    assert any("would sync MIGRATION_QUEUE" in m for m in logs) and "renumbered 3" in count_rows(logs)["Kept from the queue"]
 
 
 def test_a_changed_date_is_still_a_new_item_and_an_unknown_cell_text_never_renames():
@@ -344,7 +347,7 @@ def test_the_two_rows_of_one_item_become_one_and_keep_the_processed_status():
     assert [r[6] for r in queue[1:]] == ["Done", "Error: Drive Access | x", "Waiting", "Waiting"]      # the processed copy wins, never the Waiting copy
     assert len(queue) == 5 and summary.duplicates == 3 and summary.removed == 0 and summary.renumbered == 3       # the old (earlier / processed) row of every item is the one that stays, and it gets the new Doc No
     assert [e[0] for e in w.events] == ["header", "put", "clear_tail", "refreshed"]                          # shorter than before: only the tail is cleared
-    assert any("3 duplicate rows merged" in m for m in logs)
+    assert count_rows(logs)["Duplicate rows merged"] == "3"
 
 
 def test_status_rank_prefers_the_processed_row_and_the_earlier_row_on_a_tie():

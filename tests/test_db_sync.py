@@ -15,7 +15,7 @@ from migrator.specs import DB_CP_HEADER, SPECS
 from migrator.utils import removal_limit
 
 from tests.db_fakes import DWR, db_row, db_world, qrow8
-from tests.fakes import DWR_JSON, FID, FOLDER, URL, ns
+from tests.fakes import DWR_JSON, FID, FOLDER, URL, count_rows, ns
 
 DRQ = SPECS["drq"]
 
@@ -92,7 +92,9 @@ def test_sync_dry_run_reports_and_writes_nothing():
     summary, logs = sync(w, queue, dry_run=True)
     assert w.tabs["DB_DWR"] == before and archive_tab_name(DWR) not in w.tabs and all(c[0] == "GET" for c in w.calls)
     assert (summary.cp_updated, summary.removed) == (0, 0) and summary.plan.removals.keys() == {3}
-    assert any("(--dry-run) nothing was written: would update C/P of 1 rows, set the \"Legacy sync\" tag on 1 rows, clear it on 0 rows and remove 1 rows of DB_DWR" in m for m in logs)
+    assert any("(--dry-run) nothing was written to DB_DWR: a real run would do the counts above" in m for m in logs)
+    assert count_rows(logs) == {"In sync with the queue": "1", '"Legacy sync" tag': "set 1, clear 0", "C/P to update": "1",
+                                "To remove": "1  (were synced, PDF not in the queue any more)", "Kept as they are": "0"}
     assert any("sample (remove): DB row 3: DWR-3" in m for m in logs)
 
 
@@ -163,7 +165,7 @@ def test_a_row_that_never_came_from_the_legacy_sheet_is_kept_and_stays_untagged(
     summary, logs = sync(w, queue)
     assert [r[1] for r in w.tabs["DB_DWR"][1:]] == ["DWR-1", "DWR-40", "DWR-41"] and tags(w) == ["Synced", "", ""]
     assert (summary.removed, summary.plan.unsynced) == (0, 2) and archive_tab_name(DWR) not in w.tabs
-    assert any("kept because never synced with the legacy sheet 2" in m for m in logs)
+    assert count_rows(logs)["Kept as they are"] == "2" and count_rows(logs)["never synced with the legacy sheet"] == "2"
     summary, _ = sync(w, queue)                                                              # and it stays that way on every later run
     assert summary.removed == 0 and len(w.tabs["DB_DWR"]) == 4
 

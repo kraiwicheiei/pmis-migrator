@@ -16,7 +16,7 @@ from .models import Clients
 from .sheets import SheetsError, append_rows, list_tabs, read_values, sheets_call, values_url
 from .specs import DB_CP_HEADER, DB_SYNC_HEADER, DB_SYNC_VALUE, QueueSpec, SPECS
 from .stamps import time_stamp
-from .utils import col_letter, extract_file_id, removal_limit
+from .utils import col_letter, count_lines, extract_file_id, removal_limit
 
 # 이 도구가 쓴 행의 Status 값. 이 값이 아닌 행(사람이 넣은 행 등)은 절대 삭제하지 않음
 # [TH] ค่า Status ของแถวที่เครื่องมือนี้เขียน แถวที่ Status เป็นค่าอื่น (เช่นแถวที่คนใส่เอง) จะไม่ถูกลบเด็ดขาด
@@ -280,12 +280,17 @@ def sync_db_for_queue(args: argparse.Namespace, clients: Clients, key: str, queu
     limit = removal_limit(plan.rows)
     to_tag = {n: v for n, v in plan.tag_updates.items() if v}
     to_untag = {n: v for n, v in plan.tag_updates.items() if not v}
-    counts = (f"{plan.rows} rows | in sync with the queue {plan.synced}, \"{DB_SYNC_HEADER}\" tag to set {len(to_tag)} / to clear {len(to_untag)}, "
-              f"C/P to update {len(plan.cp_updates)}, to remove {len(plan.removals)} (were synced, PDF not in the queue any more), "
-              f"kept for a pending replacement {plan.pending}, kept because never synced with the legacy sheet {plan.unsynced}, "
-              f"kept because Status is not '{MIGRATED_STATUS}' {plan.protected}, "
-              f"different C/P values in the queue {plan.ambiguous}")
-    log(f"[{spec.name}] Sync {spec.db_tab}: {counts}")
+    kept = plan.pending + plan.unsynced + plan.protected
+    table = [("In sync with the queue", str(plan.synced), ""),
+             (f"\"{DB_SYNC_HEADER}\" tag", f"set {len(to_tag)}, clear {len(to_untag)}", ""),
+             ("C/P to update", str(len(plan.cp_updates)), ""),
+             ("To remove", str(len(plan.removals)), "(were synced, PDF not in the queue any more)"),
+             ("Kept as they are", str(kept), "")]
+    table += [(f"  {label}", str(n), "") for label, n in (("waiting for a replacement", plan.pending), ("never synced with the legacy sheet", plan.unsynced),
+                                                         (f"Status is not '{MIGRATED_STATUS}'", plan.protected)) if n]
+    if plan.ambiguous:
+        table.append(("Skipped: different C/P in the queue", str(plan.ambiguous), ""))
+    log(f"[{spec.name}] Sync {spec.db_tab}: {plan.rows} rows\n{count_lines(table)}")
 
     if not any(str(c).strip() for row in queue_rows for c in row[:1]):
         summary.refused = "empty queue"
@@ -300,8 +305,7 @@ def sync_db_for_queue(args: argparse.Namespace, clients: Clients, key: str, queu
     if args.dry_run:
         for number in sorted(plan.removals)[:5]:
             log(f"  sample (remove): DB row {number}: {str(db_values[number - 1][1]) if len(db_values[number - 1]) > 1 else ''} - {plan.removals[number]}")
-        log(f"  (--dry-run) nothing was written: would update C/P of {len(plan.cp_updates)} rows, set the \"{DB_SYNC_HEADER}\" tag on {len(to_tag)} rows, "
-            f"clear it on {len(to_untag)} rows and remove {len(plan.removals)} rows of {spec.db_tab}")
+        log(f"  (--dry-run) nothing was written to {spec.db_tab}: a real run would do the counts above")
         return summary
 
     if plan.touched:

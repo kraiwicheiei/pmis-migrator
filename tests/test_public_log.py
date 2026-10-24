@@ -214,6 +214,6 @@ def test_the_db_sync_has_no_secret_in_its_public_log():
     text = public(logs)
     assert_no_secret(text)
     assert "DWR-7" not in text and "DOC-1" not in text and "_REMOVED" in text and "DB_DWR" in text
-    assert 'Sync DB_DWR: 3 rows | in sync with the queue 2, "Legacy sync" tag to set 2 / to clear 0, C/P to update 2, to remove 1' in text
+    assert "[DWR] Sync DB_DWR: 3 rows" in text and "In sync with the queue " in text and "To remove " in text            # the aligned count lines get through
     assert "Removed 1 rows from DB_DWR (copied to _REMOVED_DB_DWR first)" in text and "Legacy sync tag in DB_DWR!U: set on 2 rows, cleared on 0 rows" in text
     assert "===== Sync DB DWR: DB_DWR <- MIGRATION_QUEUE =====" in text and "more than the limit of 100 - check the legacy sheet" in text

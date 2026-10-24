@@ -16,6 +16,21 @@ from migrator.models import Clients
 from migrator.runner import Summary, run
 
 
+def count_rows(logs):
+    """
+    로그의 정렬된 개수 줄("이름 ····· 값  (설명)")을 {이름: "값  (설명)"} 로 모음
+    [TH] รวมบรรทัดตัวเลขที่จัดแนวใน log ("ชื่อ ····· ค่า  (คำอธิบาย)") เป็น {ชื่อ: "ค่า  (คำอธิบาย)"}
+    [EN] Collects the aligned count lines of the log ("label ····· value  (note)") as {label: "value  (note)"}
+    """
+    found = {}
+    for message in logs:
+        for line in str(message).split("\n"):
+            hit = re.match(r"^\s+(.+?) ·{3,} (.*)$", line)
+            if hit:
+                found[hit.group(1)] = hit.group(2)
+    return found
+
+
 # 길이 33 의 가짜 file id
 # [TH] file id ปลอมความยาว 33
 # [EN] Fake file id of length 33

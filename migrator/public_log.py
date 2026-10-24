@@ -43,7 +43,7 @@ _KEEP = re.compile(
     r"|✓ Updated C/P in DB_[A-Z]+![A-Z]+: |✓ Legacy sync tag in DB_[A-Z]+![A-Z]+: set on \d+ rows, cleared on \d+ rows"
     r"|✓ Removed \d+ rows from DB_[A-Z]+ \(copied to |✓ DB_[A-Z]+ already matches the queue"
     r"|✗ Not syncing [A-Z_]+: \d+ rows would be removed|✗ Not syncing DB_[A-Z]+: the queue has no rows)"
-    r"|    Fix the header"
+    r"|    Fix the header|    +\S.*? ·{3,} "
     r")"
 )
 
